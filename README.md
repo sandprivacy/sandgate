@@ -104,7 +104,7 @@ How the trust works: the pairing secret travels once, inside the URL **fragment*
 - [ ] OS keychain for the vault passphrase
 - [ ] Slack approval channel with multiple approvers (teams)
 - [ ] Team policies (shared vault, centralized audit)
-- [ ] Framework guides: browser-use, LangGraph, Agno
+- [x] Framework guides: [Claude Code](docs/integrations/claude-code.md), [browser-use](docs/integrations/browser-use.md), [Playwright MCP](docs/integrations/playwright-mcp.md), [LangGraph](docs/integrations/langgraph.md)
 
 ## License
 
