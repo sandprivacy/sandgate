@@ -266,9 +266,42 @@ export const PWA_HTML = `<!doctype html>
     var mm = String(text).match(/p=([A-Za-z0-9_-]{8,64})&s=([A-Za-z0-9_-]{8,})/);
     return mm ? { pairId: mm[1], secret: mm[2] } : null;
   }
-  var pair = parsePairing(location.hash);
-  if (pair) {
-    try { localStorage.setItem(PAIR_KEY, JSON.stringify(pair)); } catch (e) {}
+  // Several vaults can pair with this device (your laptop, your server…):
+  // pairings are a list, requests from all of them show together.
+  var PAIRS_KEY = "sandgate_pairs";
+  function loadPairs() {
+    try {
+      var list = JSON.parse(localStorage.getItem(PAIRS_KEY));
+      if (Array.isArray(list) && list.length) return list;
+    } catch (e) {}
+    // Migrate the single-pairing storage of earlier versions.
+    try {
+      var old = JSON.parse(localStorage.getItem(PAIR_KEY));
+      if (old && old.pairId) {
+        var migrated = [{ name: "Vault 1", pairId: old.pairId, secret: old.secret }];
+        localStorage.setItem(PAIRS_KEY, JSON.stringify(migrated));
+        localStorage.removeItem(PAIR_KEY);
+        return migrated;
+      }
+    } catch (e) {}
+    return [];
+  }
+  var pairs = loadPairs();
+  function savePairs() {
+    try { localStorage.setItem(PAIRS_KEY, JSON.stringify(pairs)); } catch (e) {}
+  }
+  function addPairing(parsed) {
+    for (var i = 0; i < pairs.length; i++) {
+      if (pairs[i].pairId === parsed.pairId) return false;
+    }
+    pairs.push({ name: "Vault " + (pairs.length + 1), pairId: parsed.pairId, secret: parsed.secret });
+    savePairs();
+    return true;
+  }
+
+  var candidate = parsePairing(location.hash);
+  if (candidate) {
+    addPairing(candidate);
     // iOS Safari (not installed): KEEP the pairing link in the address bar.
     // With no start_url in the Apple manifest, Add to Home Screen captures
     // this exact URL — fragment included — so the installed app opens
@@ -276,11 +309,9 @@ export const PWA_HTML = `<!doctype html>
     if (!(isIOS && !standalone)) {
       history.replaceState(null, "", location.pathname);
     }
-  } else {
-    try { pair = JSON.parse(localStorage.getItem(PAIR_KEY)); } catch (e) {}
   }
 
-  if (!pair) {
+  if (!pairs.length) {
     setStatus("not paired", "err");
     var setup = document.createElement("div");
     setup.className = "setup";
@@ -293,14 +324,12 @@ export const PWA_HTML = `<!doctype html>
     document.getElementById("pasteLink").addEventListener("input", function (e) {
       var parsed = parsePairing(e.target.value);
       if (parsed) {
-        try { localStorage.setItem(PAIR_KEY, JSON.stringify(parsed)); } catch (err) {}
+        addPairing(parsed);
         location.replace(location.pathname);
       }
     });
     return;
   }
-
-  var pairLink = location.origin + "/#p=" + pair.pairId + "&s=" + pair.secret;
 
   // --- install guidance (mobile browser, not yet installed) ---------------
   var deferredInstall = null;
@@ -335,20 +364,26 @@ export const PWA_HTML = `<!doctype html>
   }
   renderBanner();
 
-  // --- crypto (mirror of pwacrypto.ts) ------------------------------------
-  var keyPromise = (async function () {
-    var raw = await crypto.subtle.importKey("raw", b64uToBytes(pair.secret), "HKDF", false, ["deriveKey"]);
-    return crypto.subtle.deriveKey(
-      { name: "HKDF", hash: "SHA-256", salt: enc.encode("sandgate-pwa-v1"), info: enc.encode("approval-channel") },
-      raw,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["encrypt", "decrypt"]
-    );
-  })();
+  // --- crypto (mirror of pwacrypto.ts), one derived key per vault ----------
+  var keyCache = {};
+  function keyFor(p) {
+    if (!keyCache[p.pairId]) {
+      keyCache[p.pairId] = (async function () {
+        var raw = await crypto.subtle.importKey("raw", b64uToBytes(p.secret), "HKDF", false, ["deriveKey"]);
+        return crypto.subtle.deriveKey(
+          { name: "HKDF", hash: "SHA-256", salt: enc.encode("sandgate-pwa-v1"), info: enc.encode("approval-channel") },
+          raw,
+          { name: "AES-GCM", length: 256 },
+          false,
+          ["encrypt", "decrypt"]
+        );
+      })();
+    }
+    return keyCache[p.pairId];
+  }
 
-  async function openSealed(sealed, aad) {
-    var key = await keyPromise;
+  async function openSealed(p, sealed, aad) {
+    var key = await keyFor(p);
     var pt = await crypto.subtle.decrypt(
       { name: "AES-GCM", iv: b64uToBytes(sealed.iv), additionalData: enc.encode(aad) },
       key,
@@ -356,8 +391,8 @@ export const PWA_HTML = `<!doctype html>
     );
     return JSON.parse(dec.decode(pt));
   }
-  async function sealPayload(payload, aad) {
-    var key = await keyPromise;
+  async function sealPayload(p, payload, aad) {
+    var key = await keyFor(p);
     var iv = crypto.getRandomValues(new Uint8Array(12));
     var ct = await crypto.subtle.encrypt(
       { name: "AES-GCM", iv: iv, additionalData: enc.encode(aad) },
@@ -371,11 +406,13 @@ export const PWA_HTML = `<!doctype html>
   // Announce this page to the relay immediately (push or not), so the
   // "sandgate pair" command can report "phone connected" without waiting
   // on notification permission.
-  fetch("/api/hello", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pairId: pair.pairId }),
-  }).catch(function () {});
+  pairs.forEach(function (p) {
+    fetch("/api/hello", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pairId: p.pairId }),
+    }).catch(function () {});
+  });
 
   var pushOn = false;
   var swRegPromise = "serviceWorker" in navigator
@@ -399,11 +436,14 @@ export const PWA_HTML = `<!doctype html>
       userVisibleOnly: true,
       applicationServerKey: b64uToBytes(vapid.publicKey),
     });
-    await fetch("/api/subscribe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pairId: pair.pairId, subscription: sub }),
-    });
+    // One device subscription, registered for every paired vault.
+    await Promise.all(pairs.map(function (p) {
+      return fetch("/api/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pairId: p.pairId, subscription: sub }),
+      });
+    }));
     pushOn = true;
     setStatus("push on");
     var btn = document.getElementById("pushBtn");
@@ -435,18 +475,19 @@ export const PWA_HTML = `<!doctype html>
   var sseOn = false;
   function connectEvents() {
     if (!("EventSource" in window)) return;
-    var es = new EventSource("/api/events?pairId=" + encodeURIComponent(pair.pairId));
-    es.addEventListener("request", fetchPending);
-    es.addEventListener("decision", fetchPending);
-    es.onopen = function () {
-      sseOn = true;
-      if (!pushOn) setStatus("live");
-    };
-    es.onerror = function () {
-      sseOn = false;
-      if (!pushOn) setStatus("polling", "warn");
-      // EventSource reconnects on its own (retry: 3000).
-    };
+    pairs.forEach(function (p) {
+      var es = new EventSource("/api/events?pairId=" + encodeURIComponent(p.pairId));
+      es.addEventListener("request", fetchPending);
+      es.addEventListener("decision", fetchPending);
+      es.onopen = function () {
+        sseOn = true;
+        if (!pushOn) setStatus("live");
+      };
+      es.onerror = function () {
+        // EventSource reconnects on its own (retry: 3000).
+        if (!pushOn) setStatus("polling", "warn");
+      };
+    });
   }
   connectEvents();
   setInterval(function () { if (!document.hidden && !sseOn) fetchPending(); }, 8000);
@@ -511,32 +552,35 @@ export const PWA_HTML = `<!doctype html>
   }
 
   async function fetchPending() {
-    var raw;
-    try {
-      raw = await (await fetch("/api/pending?pairId=" + encodeURIComponent(pair.pairId))).json();
-    } catch (e) { return; }
     var seen = {};
-    for (var i = 0; i < raw.length; i++) {
-      var id = raw[i].requestId;
-      seen[id] = true;
-      if (cards[id]) continue;
+    await Promise.all(pairs.map(async function (p) {
+      var raw;
       try {
-        var req = await openSealed(raw[i].payload, "req:" + id);
-        addCard(id, req);
-      } catch (e) { /* not ours / tampered */ }
-    }
+        raw = await (await fetch("/api/pending?pairId=" + encodeURIComponent(p.pairId))).json();
+      } catch (e) { return; }
+      for (var i = 0; i < raw.length; i++) {
+        var key = p.pairId + ":" + raw[i].requestId;
+        seen[key] = true;
+        if (cards[key]) continue;
+        try {
+          var req = await openSealed(p, raw[i].payload, "req:" + raw[i].requestId);
+          addCard(key, p, raw[i].requestId, req);
+        } catch (e) { /* not ours / tampered */ }
+      }
+    }));
     for (var cid in cards) {
       if (!seen[cid]) { cards[cid].el.remove(); delete cards[cid]; }
     }
     ensureEmpty(Object.keys(cards).length === 0);
   }
 
-  function addCard(id, req) {
+  function addCard(id, p, requestId, req) {
     var card = document.createElement("div");
     card.className = "card";
 
     var who = document.createElement("div"); who.className = "who";
-    who.textContent = "agent · approval request"; card.appendChild(who);
+    who.textContent = (pairs.length > 1 ? p.name + " · " : "") + "agent · approval request";
+    card.appendChild(who);
     var h = document.createElement("h2"); h.textContent = req.title; card.appendChild(h);
     if (req.body) { var p = document.createElement("p"); p.textContent = req.body; card.appendChild(p); }
 
@@ -554,7 +598,7 @@ export const PWA_HTML = `<!doctype html>
 
     ensureEmpty(false);
     listEl.appendChild(card);
-    cards[id] = { el: card, leftEl: left, fillEl: fill, barEl: bar, rowEl: row, req: req, done: false };
+    cards[id] = { el: card, leftEl: left, fillEl: fill, barEl: bar, rowEl: row, req: req, pair: p, requestId: requestId, done: false };
     tickOne(cards[id]);
   }
 
@@ -568,7 +612,7 @@ export const PWA_HTML = `<!doctype html>
         c.rowEl.remove();
         c.leftEl.textContent = "expired — denied";
         c.fillEl.style.width = "0%";
-        recordHist(c.req.title, "expired");
+        recordHist(histLabel(c), "expired");
       }
       return;
     }
@@ -590,16 +634,17 @@ export const PWA_HTML = `<!doctype html>
       if (!c || c.done) return;
       b.disabled = true;
       var payload = await sealPayload(
-        { requestId: id, approved: cls === "ok", ts: Date.now() },
-        "dec:" + id
+        c.pair,
+        { requestId: c.requestId, approved: cls === "ok", ts: Date.now() },
+        "dec:" + c.requestId
       );
       await fetch("/api/decision", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pairId: pair.pairId, requestId: id, payload: payload }),
+        body: JSON.stringify({ pairId: c.pair.pairId, requestId: c.requestId, payload: payload }),
       });
       if (cards[id]) {
-        recordHist(cards[id].req.title, cls === "ok" ? "approved" : "denied");
+        recordHist(histLabel(c), cls === "ok" ? "approved" : "denied");
         cards[id].el.remove();
         delete cards[id];
       }
@@ -607,6 +652,57 @@ export const PWA_HTML = `<!doctype html>
     };
     return b;
   }
+
+  function histLabel(c) {
+    return (pairs.length > 1 ? c.pair.name + ": " : "") + c.req.title;
+  }
+
+  // --- vault manager -------------------------------------------------------
+  var vaultsEl = document.createElement("div");
+  histEl.parentElement.appendChild(vaultsEl);
+  function renderVaults() {
+    vaultsEl.textContent = "";
+    var section = document.createElement("div");
+    section.className = "hist";
+    var h = document.createElement("h3");
+    h.textContent = "Vaults";
+    section.appendChild(h);
+    pairs.forEach(function (p, idx) {
+      var row = document.createElement("div"); row.className = "hrow";
+      var t = document.createElement("span"); t.className = "t"; t.textContent = p.name;
+      var x = document.createElement("span"); x.className = "d denied"; x.textContent = "remove";
+      x.style.cursor = "pointer";
+      x.onclick = function () {
+        if (!confirm("Remove " + p.name + " from this device?")) return;
+        pairs.splice(idx, 1);
+        savePairs();
+        location.reload();
+      };
+      row.appendChild(t); row.appendChild(x);
+      section.appendChild(row);
+    });
+    var addRow = document.createElement("div"); addRow.className = "hrow";
+    var add = document.createElement("span"); add.className = "d approved"; add.textContent = "+ add a vault";
+    add.style.cursor = "pointer";
+    add.onclick = function () {
+      if (document.getElementById("addPaste")) return;
+      var input = document.createElement("input");
+      input.id = "addPaste";
+      input.placeholder = "Paste a pairing link (sandgate pair)";
+      input.autocomplete = "off";
+      input.style.cssText = "width:100%;padding:10px 12px;margin-top:8px;background:var(--panel);border:1px solid var(--line);border-radius:8px;color:var(--ink);font:13px ui-monospace,monospace;";
+      input.addEventListener("input", function (e) {
+        var parsed = parsePairing(e.target.value);
+        if (parsed && addPairing(parsed)) location.reload();
+      });
+      section.appendChild(input);
+      input.focus();
+    };
+    addRow.appendChild(add);
+    section.appendChild(addRow);
+    vaultsEl.appendChild(section);
+  }
+  renderVaults();
 
   fetchPending();
 })();
