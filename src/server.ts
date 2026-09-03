@@ -5,7 +5,7 @@ import { loadVault, type VaultData } from "./vault.js";
 import { loadConfig, totpPolicy, type Config } from "./config.js";
 import { generateCode } from "./totp.js";
 import { TelegramApprover, type Approver } from "./telegram.js";
-import * as sandmail from "./sandmail.js";
+import { backendFromVault } from "./inbox.js";
 import { audit } from "./audit.js";
 
 /**
@@ -30,6 +30,8 @@ export async function serve(passphrase: string): Promise<void> {
   const approver: Approver | null = vault.telegram
     ? new TelegramApprover(vault.telegram.botToken, vault.telegram.chatId)
     : null;
+
+  const inbox = backendFromVault(vault);
 
   const needApprover = (): Approver => {
     if (!approver) {
@@ -138,17 +140,15 @@ export async function serve(passphrase: string): Promise<void> {
       },
     },
     async ({ ttl_hours }) => {
-      if (!vault.sandmail) {
+      if (!inbox) {
         return refusal(
-          "No inbox backend configured. Run `sandgate init` and add a sandmail API key (https://sandmail.dev)."
+          "No inbox backend configured. Run `sandgate connect-sandmail <api-key>` (https://sandmail.dev) or `sandgate connect-imap`."
         );
       }
       try {
-        const inbox = await sandmail.createInbox(vault.sandmail.apiKey, {
-          ttlHours: ttl_hours,
-        });
-        audit({ tool: "create_identity", decision: "auto", detail: inbox.email });
-        return text({ ok: true, email: inbox.email, expires_at: inbox.expiresAt });
+        const identity = await inbox.createIdentity(ttl_hours);
+        audit({ tool: "create_identity", decision: "auto", detail: identity.email });
+        return text({ ok: true, email: identity.email, expires_at: identity.expiresAt });
       } catch (err) {
         audit({ tool: "create_identity", decision: "error", detail: String(err) });
         return refusal(String(err));
@@ -170,15 +170,13 @@ export async function serve(passphrase: string): Promise<void> {
       },
     },
     async ({ email, timeout_sec }) => {
-      if (!vault.sandmail) {
-        return refusal("No inbox backend configured. Run `sandgate init`.");
+      if (!inbox) {
+        return refusal(
+          "No inbox backend configured. Run `sandgate connect-sandmail <api-key>` or `sandgate connect-imap`."
+        );
       }
       try {
-        const result = await sandmail.waitForOTP(
-          vault.sandmail.apiKey,
-          email,
-          timeout_sec ?? 60
-        );
+        const result = await inbox.waitForVerification(email, timeout_sec ?? 60);
         audit({
           tool: "wait_for_verification",
           decision: result.found ? "auto" : "timeout",
@@ -191,7 +189,7 @@ export async function serve(passphrase: string): Promise<void> {
           ok: true,
           found: true,
           code: result.code,
-          verification_links: result.verificationLinks ?? [],
+          verification_links: result.links,
           from: result.from,
           subject: result.subject,
         });

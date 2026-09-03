@@ -26,6 +26,13 @@ export interface VaultData {
   totp: Record<string, TotpEntry>; // keyed by domain, e.g. "github.com"
   telegram?: { botToken: string; chatId: string };
   sandmail?: { apiKey: string };
+  imap?: {
+    host: string;
+    port?: number;
+    user: string;
+    pass: string;
+    baseEmail?: string;
+  };
 }
 
 const SCRYPT_OPTS = { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };

@@ -3,6 +3,7 @@ import { stdin, stdout } from "node:process";
 import { readFileSync, existsSync } from "node:fs";
 import { read } from "read";
 import { getQuota } from "./sandmail.js";
+import { testImapConnection } from "./inbox.js";
 import { auditPath } from "./paths.js";
 import {
   vaultExists,
@@ -24,6 +25,7 @@ Usage:
   sandgate policy <domain> <auto|approve|deny>   Set the 2FA policy for a domain
   sandgate connect-telegram <bot-token>  Connect (or fix) the Telegram approval channel
   sandgate connect-sandmail <api-key>    Connect the sandmail inbox backend
+  sandgate connect-imap                  Connect your own IMAP mailbox instead (self-hosted)
   sandgate test-approval                 Send a test approval to your phone
   sandgate audit [n]                     Show the last n audit entries (default 20)
   sandgate serve                         Run the MCP server (stdio)
@@ -204,6 +206,44 @@ async function cmdConnectSandmail(apiKey?: string): Promise<void> {
   }
 }
 
+async function cmdConnectImap(): Promise<void> {
+  const prompter = new Prompter();
+  const pass = await getPassphrase(prompter);
+  const data = loadVault(pass);
+  console.log(
+    "\nYour own IMAP mailbox as the inbox backend. Agent identities become\n" +
+      "plus-addressed aliases (you+sg1a2b@domain) — check your provider supports them.\n" +
+      "Use an app password, not your main account password, whenever available.\n"
+  );
+  const host = await prompter.ask("IMAP host (e.g. imap.fastmail.com): ");
+  const portRaw = await prompter.ask("Port [993]: ");
+  const user = await prompter.ask("User / email: ");
+  const imapPass = await prompter.ask("Password (app password): ", { hidden: true });
+  const baseEmail = await prompter.ask(`Alias base address [${user}]: `);
+  prompter.close();
+  const config = {
+    host: host.trim(),
+    port: portRaw ? parseInt(portRaw, 10) : 993,
+    user: user.trim(),
+    pass: imapPass,
+    baseEmail: baseEmail.trim() || undefined,
+  };
+  process.stdout.write("Testing the connection… ");
+  try {
+    await testImapConnection(config);
+    console.log("ok.");
+  } catch (err) {
+    console.error(`failed: ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
+  }
+  data.imap = config;
+  saveVault(pass, data);
+  const note = data.sandmail
+    ? " Note: sandmail is also configured and takes precedence; remove it from the vault to use IMAP."
+    : "";
+  console.log(`IMAP connected (${config.user}@${config.host}).${note}`);
+}
+
 async function cmdAudit(countArg?: string): Promise<void> {
   const count = Math.max(1, parseInt(countArg ?? "20", 10) || 20);
   if (!existsSync(auditPath())) {
@@ -264,6 +304,8 @@ async function main(): Promise<void> {
       return cmdConnectTelegram(args[0]);
     case "connect-sandmail":
       return cmdConnectSandmail(args[0]);
+    case "connect-imap":
+      return cmdConnectImap();
     case "test-approval":
       return cmdTestApproval();
     case "audit":

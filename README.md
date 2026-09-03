@@ -69,14 +69,14 @@ sandgate policy mybank.com deny      # never
 
 1. **Zero disclosure.** The LLM sees derived, short-lived values (a 6-digit code, an approval verdict) — never seeds, tokens or passwords.
 2. **Deny by default.** Unknown domains refuse. Unanswered approvals refuse. Policy gaps refuse.
-3. **Self-hosted.** Runs on your machine; the vault and the audit trail never leave it. The email backend is pluggable ([sandmail](https://sandmail.dev) works out of the box; generic IMAP is on the roadmap).
+3. **Self-hosted.** Runs on your machine; the vault and the audit trail never leave it. The email backend is pluggable: [sandmail](https://sandmail.dev) works out of the box (managed disposable inboxes), or bring your own mailbox with `sandgate connect-imap` — identities become plus-addressed aliases (`you+sg1a2b@domain`) and codes/links are extracted locally.
 4. **Everything audited.** If an agent asked for it, it's in the log.
 
 ## Roadmap
 
+- [x] Generic IMAP backend for verification emails (`sandgate connect-imap`)
+- [x] `sandgate audit` — pretty-print the audit trail
 - [ ] Dedicated mobile PWA with end-to-end-encrypted web push (replaces the Telegram MVP)
-- [ ] Generic IMAP backend for verification emails
-- [ ] `sandgate audit` — pretty-print and filter the audit trail
 - [ ] Team policies (shared vault, multiple approvers)
 - [ ] Framework guides: browser-use, LangGraph, Agno
 
