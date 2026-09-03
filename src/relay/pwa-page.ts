@@ -598,7 +598,9 @@ export const PWA_HTML = `<!doctype html>
     who.textContent = (pairs.length > 1 ? p.name + " · " : "") + "agent · approval request";
     card.appendChild(who);
     var h = document.createElement("h2"); h.textContent = req.title; card.appendChild(h);
-    if (req.body) { var p = document.createElement("p"); p.textContent = req.body; card.appendChild(p); }
+    // NOTE: never name this variable p — var is function-scoped and would
+    // shadow the pairing parameter for the rest of addCard (real bug once).
+    if (req.body) { var bodyP = document.createElement("p"); bodyP.textContent = req.body; card.appendChild(bodyP); }
 
     var timer = document.createElement("div"); timer.className = "timer";
     var left = document.createElement("div"); left.className = "left";

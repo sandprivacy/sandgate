@@ -52,7 +52,10 @@ export async function startRelay(opts: {
     writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 });
   }
   const persist = () => writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 });
-  webpush.setVapidDetails("mailto:relay@sandgate.local", state.vapid.publicKey, state.vapid.privateKey);
+  // Apple's push service rejects invalid VAPID subjects (a .local mailto
+  // qualifies); use a real https URL and log delivery failures instead of
+  // swallowing them.
+  webpush.setVapidDetails("https://sandgate.dev", state.vapid.publicKey, state.vapid.privateKey);
 
   const pairings = new Map<string, Pairing>();
   const getPairing = (pairId: string): Pairing => {
@@ -209,7 +212,13 @@ export async function startRelay(opts: {
         if (pairing.subscription) {
           webpush
             .sendNotification(pairing.subscription, JSON.stringify({ type: "approval" }))
-            .catch(() => {}); // phone offline / stale sub — PWA polls anyway
+            .catch((err: any) => {
+              // Phone offline / stale sub is normal (PWA polls anyway), but
+              // ops must be able to SEE a push service rejecting us.
+              console.error(
+                `[push] delivery failed (HTTP ${err?.statusCode ?? "?"}): ${String(err?.body ?? err).slice(0, 200)}`
+              );
+            });
         }
         notifyListeners(pairing, "request");
         return json(res, 200, { ok: true });
