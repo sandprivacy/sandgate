@@ -361,15 +361,24 @@ async function cmdPair(relayUrl?: string): Promise<void> {
   console.log("\nWaiting for the phone to subscribe (2 min)…");
 
   const deadline = Date.now() + 120_000;
+  let seenAnnounced = false;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(
         `${base}/api/pair-status?pairId=${encodeURIComponent(pairing.pairId)}`
       );
-      const status = (await res.json()) as { subscribed: boolean };
+      const status = (await res.json()) as { subscribed: boolean; seen?: boolean };
       if (status.subscribed) {
-        console.log("Paired! The PWA now takes over approvals (Telegram becomes the fallback). Try: sandgate test-approval");
+        console.log(
+          "Paired, push notifications on. The PWA now takes over approvals (Telegram becomes the fallback). Try: sandgate test-approval"
+        );
         return;
+      }
+      if (status.seen && !seenAnnounced) {
+        seenAnnounced = true;
+        console.log(
+          'Phone connected. For notifications with the app closed, tap "Enable notifications" in the app (on iPhone: install to home screen first)…'
+        );
       }
     } catch {
       // relay not reachable yet; keep trying
@@ -377,7 +386,9 @@ async function cmdPair(relayUrl?: string): Promise<void> {
     await new Promise((r) => setTimeout(r, 3000));
   }
   console.log(
-    "No subscription yet — the pairing is saved anyway. Open the link on the phone, then check with: sandgate test-approval"
+    seenAnnounced
+      ? "Paired (no push yet — the app works while open; enable notifications in it when you can)."
+      : "No phone yet — the pairing is saved anyway. Open the link on the phone, then check with: sandgate test-approval"
   );
 }
 

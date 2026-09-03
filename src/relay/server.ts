@@ -26,6 +26,8 @@ interface Pairing {
   requests: Map<string, RelayRequestEntry>;
   /** Open SSE responses from PWA pages; notified on new requests/decisions. */
   listeners: Set<ServerResponse>;
+  /** Last time a PWA page with this pairing said hello (push or not). */
+  lastSeen?: number;
 }
 
 const MAX_BODY = 64 * 1024;
@@ -173,10 +175,23 @@ export async function startRelay(opts: {
         return json(res, 200, { ok: true });
       }
 
+      // The page announces itself on load, push or not — this is what lets
+      // `sandgate pair` say "phone connected" even before notifications.
+      if (req.method === "POST" && url.pathname === "/api/hello") {
+        const body = await readBody(req);
+        if (!validId(body.pairId)) return json(res, 400, { error: "bad pairId" });
+        getPairing(body.pairId).lastSeen = Date.now();
+        return json(res, 200, { ok: true });
+      }
+
       if (req.method === "GET" && url.pathname === "/api/pair-status") {
         const pairId = url.searchParams.get("pairId") ?? "";
         if (!validId(pairId)) return json(res, 400, { error: "bad pairId" });
-        return json(res, 200, { subscribed: !!getPairing(pairId).subscription });
+        const pairing = getPairing(pairId);
+        return json(res, 200, {
+          subscribed: !!pairing.subscription,
+          seen: !!pairing.lastSeen || !!pairing.subscription,
+        });
       }
 
       if (req.method === "POST" && url.pathname === "/api/request") {

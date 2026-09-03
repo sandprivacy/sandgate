@@ -367,37 +367,69 @@ export const PWA_HTML = `<!doctype html>
     return { iv: bytesToB64u(iv), ct: bytesToB64u(ct) };
   }
 
-  // --- push subscription ---------------------------------------------------
+  // --- presence + push subscription ---------------------------------------
+  // Announce this page to the relay immediately (push or not), so the
+  // "sandgate pair" command can report "phone connected" without waiting
+  // on notification permission.
+  fetch("/api/hello", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pairId: pair.pairId }),
+  }).catch(function () {});
+
   var pushOn = false;
-  (async function () {
-    try {
-      if ("serviceWorker" in navigator) {
-        var reg = await navigator.serviceWorker.register("/sw.js");
+  var swRegPromise = "serviceWorker" in navigator
+    ? navigator.serviceWorker.register("/sw.js").then(function (reg) {
         navigator.serviceWorker.addEventListener("message", function (e) {
           if (e.data === "refresh") fetchPending();
         });
-        if ("PushManager" in window && (standalone || !isIOS)) {
-          var perm = await Notification.requestPermission();
-          if (perm === "granted") {
-            var vapid = await (await fetch("/api/vapid")).json();
-            var sub = await reg.pushManager.subscribe({
-              userVisibleOnly: true,
-              applicationServerKey: b64uToBytes(vapid.publicKey),
-            });
-            await fetch("/api/subscribe", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ pairId: pair.pairId, subscription: sub }),
-            });
-            pushOn = true;
-            setStatus("push on");
-            return;
-          }
-        }
-      }
-    } catch (e) { /* fall through to live/polling status */ }
-    if (!pushOn) setStatus(sseOn ? "live" : "polling", "warn");
-  })();
+        return reg;
+      })
+    : Promise.resolve(null);
+
+  async function enablePush() {
+    var reg = await swRegPromise;
+    if (!reg || !("PushManager" in window)) return false;
+    // iOS only shows the permission prompt inside a user gesture, and only
+    // in the installed app — never in Safari tabs.
+    var perm = await Notification.requestPermission();
+    if (perm !== "granted") return false;
+    var vapid = await (await fetch("/api/vapid")).json();
+    var sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: b64uToBytes(vapid.publicKey),
+    });
+    await fetch("/api/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pairId: pair.pairId, subscription: sub }),
+    });
+    pushOn = true;
+    setStatus("push on");
+    var btn = document.getElementById("pushBtn");
+    if (btn) btn.parentElement.remove();
+    return true;
+  }
+
+  function offerPush() {
+    if (!("Notification" in window) || !("PushManager" in window)) return;
+    if (isIOS && !standalone) return; // impossible in Safari tabs; banner handles install
+    if (Notification.permission === "granted") {
+      enablePush().catch(function () {});
+      return;
+    }
+    if (Notification.permission === "denied") return;
+    var b = document.createElement("div");
+    b.className = "banner";
+    b.innerHTML =
+      '<h2>One tap left: notifications</h2>' +
+      '<button class="act" id="pushBtn">Enable notifications</button>';
+    bannerEl.appendChild(b);
+    document.getElementById("pushBtn").addEventListener("click", function () {
+      enablePush().catch(function () {});
+    });
+  }
+  offerPush();
 
   // --- live updates: SSE with a slow safety poll ---------------------------
   var sseOn = false;
