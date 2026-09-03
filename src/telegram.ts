@@ -2,7 +2,10 @@ import { randomBytes } from "node:crypto";
 
 /**
  * MVP approval channel: a Telegram bot DM with Approve/Deny buttons.
- * Zero dependencies — plain Bot API over fetch, long-polling for the answer.
+ * Zero dependencies — plain Bot API over fetch, long-polling for answers.
+ * A single dispatcher loop serves any number of concurrent approval
+ * requests (Telegram allows only one getUpdates consumer per bot), so
+ * several agents can be waiting on the human at once.
  * (The dedicated PWA with E2EE web push replaces this in a later release;
  * the Approver interface is what it will implement.)
  */
@@ -22,13 +25,28 @@ export interface Approver {
   request(req: ApprovalRequest): Promise<ApprovalResult>;
 }
 
+interface PendingApproval {
+  resolve: (result: ApprovalResult) => void;
+  messageId: number;
+  text: string;
+  deadline: number;
+}
+
+// Telegram messages cap at 4096 chars; keep agent-supplied text well under.
+const MAX_FIELD = 1000;
+
 export class TelegramApprover implements Approver {
+  private pending = new Map<string, PendingApproval>();
+  private polling = false;
+  private offset = 0;
+
   constructor(
     private botToken: string,
     private chatId: string
   ) {}
 
-  private async api(method: string, params: Record<string, unknown>) {
+  /** Overridable in tests. */
+  protected async api(method: string, params: Record<string, unknown>): Promise<any> {
     const res = await fetch(
       `https://api.telegram.org/bot${this.botToken}/${method}`,
       {
@@ -46,8 +64,8 @@ export class TelegramApprover implements Approver {
     const nonce = randomBytes(8).toString("hex");
     const text =
       `🚪 *sandgate — approval requested*\n\n` +
-      `*${escapeMd(req.title)}*` +
-      (req.body ? `\n\n${escapeMd(req.body)}` : "") +
+      `*${escapeMd(req.title.slice(0, MAX_FIELD))}*` +
+      (req.body ? `\n\n${escapeMd(req.body.slice(0, MAX_FIELD))}` : "") +
       `\n\n_No answer in ${req.timeoutSec}s = denied._`;
 
     const message = await this.api("sendMessage", {
@@ -64,41 +82,79 @@ export class TelegramApprover implements Approver {
       },
     });
 
-    const deadline = Date.now() + req.timeoutSec * 1000;
-    let offset = 0;
-    while (Date.now() < deadline) {
-      const pollSec = Math.min(
-        25,
-        Math.max(1, Math.ceil((deadline - Date.now()) / 1000))
-      );
-      const updates: any[] = await this.api("getUpdates", {
-        offset,
-        timeout: pollSec,
-        allowed_updates: ["callback_query"],
+    return new Promise<ApprovalResult>((resolve) => {
+      this.pending.set(nonce, {
+        resolve,
+        messageId: message.message_id,
+        text,
+        deadline: Date.now() + req.timeoutSec * 1000,
       });
-      for (const update of updates) {
-        offset = update.update_id + 1;
-        const cb = update.callback_query;
-        if (!cb?.data?.endsWith(`:${nonce}`)) continue;
-        const approved = cb.data.startsWith("ok:");
-        await this.api("answerCallbackQuery", { callback_query_id: cb.id });
-        await this.api("editMessageText", {
-          chat_id: this.chatId,
-          message_id: message.message_id,
-          text: text + (approved ? "\n\n✅ *Approved*" : "\n\n❌ *Denied*"),
-          parse_mode: "Markdown",
-        });
-        return { approved, decision: approved ? "approved" : "denied" };
-      }
-    }
+      void this.runDispatcher();
+    });
+  }
 
-    await this.api("editMessageText", {
+  private settle(nonce: string, entry: PendingApproval, result: ApprovalResult, suffix: string) {
+    this.pending.delete(nonce);
+    void this.api("editMessageText", {
       chat_id: this.chatId,
-      message_id: message.message_id,
-      text: text + "\n\n⏱ *Timed out — denied*",
+      message_id: entry.messageId,
+      text: entry.text + `\n\n${suffix}`,
       parse_mode: "Markdown",
     }).catch(() => {});
-    return { approved: false, decision: "timeout" };
+    entry.resolve(result);
+  }
+
+  private async runDispatcher(): Promise<void> {
+    if (this.polling) return;
+    this.polling = true;
+    try {
+      while (this.pending.size > 0) {
+        const now = Date.now();
+        for (const [nonce, entry] of [...this.pending]) {
+          if (now >= entry.deadline) {
+            this.settle(nonce, entry, { approved: false, decision: "timeout" }, "⏱ *Timed out — denied*");
+          }
+        }
+        if (this.pending.size === 0) break;
+
+        const soonest = Math.min(...[...this.pending.values()].map((p) => p.deadline));
+        const pollSec = Math.min(10, Math.max(1, Math.ceil((soonest - Date.now()) / 1000)));
+        let updates: any[];
+        try {
+          updates = await this.api("getUpdates", {
+            offset: this.offset,
+            timeout: pollSec,
+            allowed_updates: ["callback_query"],
+          });
+        } catch {
+          await new Promise((r) => setTimeout(r, 2000)); // transient network/API error
+          continue;
+        }
+
+        for (const update of updates) {
+          this.offset = update.update_id + 1;
+          const cb = update.callback_query;
+          if (!cb?.data) continue;
+          const [verdict, nonce] = String(cb.data).split(":");
+          const entry = nonce ? this.pending.get(nonce) : undefined;
+          if (!entry) continue;
+          // Only accept taps on our message in our chat.
+          if (String(cb.message?.chat?.id ?? "") !== String(this.chatId)) continue;
+          const approved = verdict === "ok";
+          await this.api("answerCallbackQuery", { callback_query_id: cb.id }).catch(() => {});
+          this.settle(
+            nonce!,
+            entry,
+            { approved, decision: approved ? "approved" : "denied" },
+            approved ? "✅ *Approved*" : "❌ *Denied*"
+          );
+        }
+      }
+    } finally {
+      this.polling = false;
+      // A request may have landed while we were shutting down.
+      if (this.pending.size > 0) void this.runDispatcher();
+    }
   }
 }
 

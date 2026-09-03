@@ -72,6 +72,13 @@ sandgate policy mybank.com deny      # never
 3. **Self-hosted.** Runs on your machine; the vault and the audit trail never leave it. The email backend is pluggable: [sandmail](https://sandmail.dev) works out of the box (managed disposable inboxes), or bring your own mailbox with `sandgate connect-imap` — identities become plus-addressed aliases (`you+sg1a2b@domain`) and codes/links are extracted locally.
 4. **Everything audited.** If an agent asked for it, it's in the log.
 
+## Security notes, honestly
+
+- `SANDGATE_PASSPHRASE` in the MCP client config is a deliberate tradeoff: MCP clients launch servers non-interactively, so the passphrase lives in your agent's config file. It protects the vault *at rest* (a stolen `vault.enc` alone is useless); OS keychain integration is on the roadmap.
+- Approval taps are only accepted from your own Telegram chat; anything else — including silence — is a deny. Agent-supplied text in approval messages is escaped and truncated.
+- Email content handled by `wait_for_verification` is untrusted third-party input. The tool description tells agents so; only the extracted code and hint-filtered links are returned, never the raw body.
+- Several agents can wait on you at once: approvals are served by a single dispatcher, first tap wins per request.
+
 ## Roadmap
 
 - [x] Generic IMAP backend for verification emails (`sandgate connect-imap`)
