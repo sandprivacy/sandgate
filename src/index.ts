@@ -11,6 +11,7 @@ import {
   vaultExists,
   loadVault,
   saveVault,
+  rekeyVault,
   type VaultData,
 } from "./vault.js";
 import { loadConfig, saveConfig, type Policy } from "./config.js";
@@ -31,6 +32,7 @@ Usage:
   sandgate connect-sandmail <api-key>    Connect the sandmail inbox backend
   sandgate connect-imap                  Connect your own IMAP mailbox instead (self-hosted)
   sandgate test-approval                 Send a test approval to your phone
+  sandgate rekey                         Change the vault passphrase
   sandgate status                        Show what is configured and active
   sandgate audit [n]                     Show the last n audit entries (default 20)
   sandgate serve                         Run the MCP server (stdio)
@@ -249,6 +251,26 @@ async function cmdConnectImap(): Promise<void> {
   console.log(`IMAP connected (${config.user}@${config.host}).${note}`);
 }
 
+async function cmdRekey(): Promise<void> {
+  const prompter = new Prompter();
+  const current = await prompter.ask("Current passphrase: ", { hidden: true });
+  const next = await prompter.ask("New passphrase: ", { hidden: true });
+  const confirm = await prompter.ask("Confirm new passphrase: ", { hidden: true });
+  prompter.close();
+  if (!next) {
+    console.error("A passphrase is required.");
+    process.exit(1);
+  }
+  if (next !== confirm) {
+    console.error("Passphrases do not match.");
+    process.exit(1);
+  }
+  rekeyVault(current, next); // throws "wrong passphrase" if current is bad
+  console.log(
+    "Vault re-encrypted. Update SANDGATE_PASSPHRASE (or your passphrase command's store) everywhere sandgate serve is launched."
+  );
+}
+
 async function cmdStatus(): Promise<void> {
   if (!vaultExists()) {
     console.log("No vault. Run `sandgate init` to get started.");
@@ -439,6 +461,8 @@ async function main(): Promise<void> {
       return cmdRelay(args[0]);
     case "pair":
       return cmdPair(args[0]);
+    case "rekey":
+      return cmdRekey();
     case "status":
       return cmdStatus();
     case "audit":

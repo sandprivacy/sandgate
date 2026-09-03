@@ -7,7 +7,7 @@ import { join } from "node:path";
 // Point sandgate at a throwaway home before importing modules that use it.
 process.env.SANDGATE_HOME = mkdtempSync(join(tmpdir(), "sandgate-test-"));
 
-const { saveVault, loadVault } = await import("../vault.js");
+const { saveVault, loadVault, rekeyVault } = await import("../vault.js");
 const { generateCode, normalizeSecret } = await import("../totp.js");
 const { loadConfig, saveConfig, totpPolicy } = await import("../config.js");
 
@@ -19,6 +19,15 @@ test("vault round-trips and rejects a wrong passphrase", () => {
   saveVault("correct horse", data);
   assert.deepEqual(loadVault("correct horse"), data);
   assert.throws(() => loadVault("wrong"), /wrong passphrase/);
+});
+
+test("rekey re-encrypts under the new passphrase and retires the old one", () => {
+  const data = { totp: { "site.com": { secret: "JBSWY3DPEHPK3PXP" } } };
+  saveVault("old-pass", data);
+  rekeyVault("old-pass", "new-pass");
+  assert.deepEqual(loadVault("new-pass"), data);
+  assert.throws(() => loadVault("old-pass"), /wrong passphrase/);
+  assert.throws(() => rekeyVault("old-pass", "whatever"), /wrong passphrase/);
 });
 
 test("totp generates stable 6-digit codes", () => {

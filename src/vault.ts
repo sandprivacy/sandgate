@@ -77,6 +77,12 @@ export function saveVault(passphrase: string, data: VaultData): void {
   writeFileSync(vaultPath(), JSON.stringify(file), { mode: 0o600 });
 }
 
+/** Change the vault passphrase in place: decrypt with the old, re-encrypt with the new. */
+export function rekeyVault(oldPassphrase: string, newPassphrase: string): void {
+  const data = loadVault(oldPassphrase);
+  saveVault(newPassphrase, data);
+}
+
 export function loadVault(passphrase: string): VaultData {
   if (!vaultExists()) {
     throw new Error(
