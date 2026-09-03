@@ -11,8 +11,8 @@ export const PWA_MANIFEST = JSON.stringify({
   short_name: "sandgate",
   start_url: "/",
   display: "standalone",
-  background_color: "#14120d",
-  theme_color: "#14120d",
+  background_color: "#141210",
+  theme_color: "#141210",
 });
 
 export const PWA_SW = `
@@ -45,31 +45,116 @@ export const PWA_HTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#141210">
 <link rel="manifest" href="/manifest.webmanifest">
 <title>sandgate</title>
 <style>
-  :root { color-scheme: dark; }
-  body { margin: 0; background: #14120d; color: #ece7da; font: 16px/1.5 system-ui, sans-serif; }
-  .wrap { max-width: 480px; margin: 0 auto; padding: 24px 16px 48px; }
-  h1 { font-size: 22px; margin: 0 0 4px; } h1 span { color: #d29b3d; }
-  .status { font-size: 13px; color: #a89f8c; margin-bottom: 20px; }
-  .card { background: #24211a; border: 1px solid #3a352a; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
-  .card h2 { font-size: 17px; margin: 0 0 6px; }
-  .card p { margin: 0 0 12px; color: #cfc8b8; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .meta { font-size: 12px; color: #a89f8c; margin-bottom: 12px; }
+  :root {
+    color-scheme: dark;
+    --ground: #141210;
+    --panel: #1e1b16;
+    --panel-raised: #262219;
+    --line: #35301f;
+    --ink: #efe9db;
+    --soft: #a69c85;
+    --accent: #d9a441;
+    --ok: #3f9169;
+    --ok-press: #337a57;
+    --no: #c2563e;
+    --no-press: #a64732;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 16px/1.5 -apple-system, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif;
+    min-height: 100dvh;
+  }
+  header {
+    position: sticky; top: 0; z-index: 2;
+    display: flex; align-items: center; gap: 12px;
+    padding: calc(env(safe-area-inset-top, 0px) + 14px) 18px 14px;
+    background: color-mix(in srgb, var(--ground) 88%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+  }
+  .logo {
+    width: 38px; height: 38px; border-radius: 10px;
+    background: linear-gradient(145deg, #2c2517, #1c1811);
+    border: 1px solid #4a3d1f;
+    display: grid; place-items: center; font-size: 20px;
+    box-shadow: inset 0 1px 0 rgba(217,164,65,.15);
+  }
+  .title { flex: 1; }
+  .title h1 { font-size: 17px; margin: 0; letter-spacing: .01em; }
+  .title .sub { font-size: 11.5px; color: var(--soft); letter-spacing: .06em; text-transform: uppercase; }
+  .pill {
+    font-size: 11px; font-weight: 600; letter-spacing: .04em;
+    padding: 5px 10px; border-radius: 999px; white-space: nowrap;
+    background: #26311f; color: #9dc98a; border: 1px solid #3b4a30;
+  }
+  .pill.warn { background: #332a17; color: var(--accent); border-color: #4a3d1f; }
+  .pill.err  { background: #331d17; color: #d98a76; border-color: #4a2a1f; }
+
+  main { max-width: 520px; margin: 0 auto; padding: 18px 16px calc(env(safe-area-inset-bottom, 0px) + 40px); }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px 16px 14px;
+    margin-bottom: 14px;
+    animation: rise .25s ease-out;
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
+  @media (prefers-reduced-motion: reduce) { .card { animation: none; } }
+  .card .who { font-size: 11px; color: var(--accent); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 6px; }
+  .card h2 { font-size: 18px; line-height: 1.3; margin: 0 0 6px; }
+  .card p { margin: 0 0 12px; color: #cfc6b2; font-size: 14.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .timer { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .timer .left { font-size: 12px; color: var(--soft); min-width: 86px; font-variant-numeric: tabular-nums; }
+  .bar { flex: 1; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; transition: width 1s linear; }
+  .bar.low i { background: var(--no); }
   .row { display: flex; gap: 10px; }
-  button { flex: 1; padding: 12px; font-size: 16px; font-weight: 600; border: 0; border-radius: 8px; cursor: pointer; }
-  .ok { background: #2f6b4f; color: #fff; } .no { background: #9c3f2e; color: #fff; }
-  .expired { opacity: 0.45; }
-  .empty { text-align: center; color: #a89f8c; padding: 40px 0; }
+  button {
+    flex: 1; padding: 13px; font-size: 16px; font-weight: 650;
+    border: 0; border-radius: 10px; cursor: pointer; color: #fff;
+    font-family: inherit; letter-spacing: .01em;
+    transition: transform .06s ease;
+  }
+  button:active { transform: scale(.97); }
+  button:disabled { opacity: .5; }
+  .ok { background: var(--ok); } .ok:active { background: var(--ok-press); }
+  .no { background: var(--no); } .no:active { background: var(--no-press); }
+  .expired { opacity: .45; }
+  .expired h2 { text-decoration: line-through; text-decoration-thickness: 1px; }
+
+  .empty { text-align: center; padding: 72px 20px; color: var(--soft); }
+  .empty .glyph { font-size: 44px; margin-bottom: 14px; filter: saturate(.8); }
+  .empty .big { font-size: 16px; color: #cfc6b2; margin-bottom: 4px; }
+  .empty .hint { font-size: 13px; }
+
+  .setup { text-align: center; padding: 60px 24px; color: #cfc6b2; }
+  .setup code {
+    display: inline-block; margin-top: 10px; padding: 8px 14px; border-radius: 8px;
+    background: var(--panel-raised); border: 1px solid var(--line);
+    font: 14px ui-monospace, "Cascadia Mono", monospace; color: var(--accent);
+  }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <h1><span>🚪</span> sandgate</h1>
-  <div class="status" id="status">starting…</div>
-  <div id="list"></div>
-</div>
+<header>
+  <div class="logo">🚪</div>
+  <div class="title">
+    <h1>sandgate</h1>
+    <div class="sub">your agents ask. you decide.</div>
+  </div>
+  <div class="pill warn" id="status">starting…</div>
+</header>
+<main><div id="list"></div></main>
 <script>
 (function () {
   var PAIR_KEY = "sandgate_pair";
@@ -87,6 +172,13 @@ export const PWA_HTML = `<!doctype html>
   }
   var enc = new TextEncoder(), dec = new TextDecoder();
 
+  var statusEl = document.getElementById("status");
+  var listEl = document.getElementById("list");
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = "pill" + (cls ? " " + cls : "");
+  }
+
   // --- pairing -------------------------------------------------------------
   var pair = null;
   var m = location.hash.match(/p=([A-Za-z0-9_-]+)&s=([A-Za-z0-9_-]+)/);
@@ -97,10 +189,9 @@ export const PWA_HTML = `<!doctype html>
   } else {
     try { pair = JSON.parse(localStorage.getItem(PAIR_KEY)); } catch (e) {}
   }
-  var statusEl = document.getElementById("status");
-  var listEl = document.getElementById("list");
   if (!pair) {
-    statusEl.textContent = "Not paired. On your computer, run: sandgate pair — then open the link it prints on this phone.";
+    setStatus("not paired", "err");
+    listEl.innerHTML = '<div class="setup">Not paired yet.<br>On your computer, run<br><code>sandgate pair</code><br><br>then open the link it prints on this device.</div>';
     return;
   }
 
@@ -142,7 +233,7 @@ export const PWA_HTML = `<!doctype html>
       if ("serviceWorker" in navigator) {
         var reg = await navigator.serviceWorker.register("/sw.js");
         navigator.serviceWorker.addEventListener("message", function (e) {
-          if (e.data === "refresh") refresh();
+          if (e.data === "refresh") fetchPending();
         });
         if ("PushManager" in window) {
           var perm = await Notification.requestPermission();
@@ -157,80 +248,105 @@ export const PWA_HTML = `<!doctype html>
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ pairId: pair.pairId, subscription: sub }),
             });
-            statusEl.textContent = "Paired — push notifications on.";
+            setStatus("● push on");
             return;
           }
         }
       }
-      statusEl.textContent = "Paired — keep this tab open (no push permission).";
+      setStatus("polling — keep open", "warn");
     } catch (e) {
-      statusEl.textContent = "Paired — push unavailable (" + e.message + "). Polling instead.";
+      setStatus("polling — keep open", "warn");
     }
   })();
 
   // --- approval list -------------------------------------------------------
-  async function refresh() {
-    var res, items;
+  var items = []; // [{requestId, req:{title,body,timeoutSec,ts}, decided}]
+
+  async function fetchPending() {
+    var res, raw;
     try {
       res = await fetch("/api/pending?pairId=" + encodeURIComponent(pair.pairId));
-      items = await res.json();
+      raw = await res.json();
     } catch (e) { return; }
-    var frag = document.createDocumentFragment();
-    var shown = 0;
-    for (var i = 0; i < items.length; i++) {
-      var item = items[i];
-      var req;
-      try { req = await openSealed(item.payload, "req:" + item.requestId); }
-      catch (e) { continue; } // not for this pairing / tampered
-      var remaining = Math.round((req.ts + req.timeoutSec * 1000 - Date.now()) / 1000);
-      var card = document.createElement("div");
-      card.className = "card" + (remaining <= 0 ? " expired" : "");
-      var h = document.createElement("h2"); h.textContent = req.title; card.appendChild(h);
-      if (req.body) { var p = document.createElement("p"); p.textContent = req.body; card.appendChild(p); }
-      var meta = document.createElement("div"); meta.className = "meta";
-      meta.textContent = remaining > 0 ? remaining + "s left — no answer = denied" : "expired — denied";
-      card.appendChild(meta);
-      if (remaining > 0) {
-        var row = document.createElement("div"); row.className = "row";
-        row.appendChild(makeBtn("✅ Approve", "ok", item.requestId, true));
-        row.appendChild(makeBtn("❌ Deny", "no", item.requestId, false));
-        card.appendChild(row);
-      }
-      frag.appendChild(card);
-      shown++;
+    var next = [];
+    for (var i = 0; i < raw.length; i++) {
+      var existing = items.find(function (x) { return x.requestId === raw[i].requestId; });
+      if (existing) { next.push(existing); continue; }
+      try {
+        var req = await openSealed(raw[i].payload, "req:" + raw[i].requestId);
+        next.push({ requestId: raw[i].requestId, req: req, decided: false });
+      } catch (e) { /* not ours / tampered */ }
     }
-    listEl.textContent = "";
-    if (!shown) {
-      var empty = document.createElement("div"); empty.className = "empty";
-      empty.textContent = "Nothing waiting for you. 🎉";
-      listEl.appendChild(empty);
-    } else {
-      listEl.appendChild(frag);
-    }
+    items = next;
+    render();
   }
 
-  function makeBtn(label, cls, requestId, approved) {
+  function render() {
+    listEl.textContent = "";
+    var active = items.filter(function (x) { return !x.decided; });
+    if (!active.length) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.innerHTML = '<div class="glyph">🏜️</div><div class="big">All quiet.</div><div class="hint">When an agent needs you, it shows up here.</div>';
+      listEl.appendChild(empty);
+      return;
+    }
+    active.forEach(function (item) {
+      var req = item.req;
+      var total = req.timeoutSec * 1000;
+      var remaining = Math.max(0, req.ts + total - Date.now());
+      var card = document.createElement("div");
+      card.className = "card" + (remaining <= 0 ? " expired" : "");
+
+      var who = document.createElement("div"); who.className = "who";
+      who.textContent = "agent · approval request"; card.appendChild(who);
+      var h = document.createElement("h2"); h.textContent = req.title; card.appendChild(h);
+      if (req.body) { var p = document.createElement("p"); p.textContent = req.body; card.appendChild(p); }
+
+      var timer = document.createElement("div"); timer.className = "timer";
+      var left = document.createElement("div"); left.className = "left";
+      var secs = Math.ceil(remaining / 1000);
+      left.textContent = remaining > 0 ? secs + "s — then denied" : "expired — denied";
+      var bar = document.createElement("div"); bar.className = "bar" + (remaining > 0 && remaining < total * .25 ? " low" : "");
+      var fill = document.createElement("i");
+      fill.style.width = Math.max(0, Math.min(100, (remaining / total) * 100)) + "%";
+      bar.appendChild(fill); timer.appendChild(left); timer.appendChild(bar);
+      card.appendChild(timer);
+
+      if (remaining > 0) {
+        var row = document.createElement("div"); row.className = "row";
+        row.appendChild(makeBtn("Approve", "ok", item));
+        row.appendChild(makeBtn("Deny", "no", item));
+        card.appendChild(row);
+      }
+      listEl.appendChild(card);
+    });
+  }
+
+  function makeBtn(label, cls, item) {
     var b = document.createElement("button");
     b.className = cls; b.textContent = label;
     b.onclick = async function () {
       b.disabled = true;
       var payload = await sealPayload(
-        { requestId: requestId, approved: approved, ts: Date.now() },
-        "dec:" + requestId
+        { requestId: item.requestId, approved: cls === "ok", ts: Date.now() },
+        "dec:" + item.requestId
       );
       await fetch("/api/decision", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pairId: pair.pairId, requestId: requestId, payload: payload }),
+        body: JSON.stringify({ pairId: pair.pairId, requestId: item.requestId, payload: payload }),
       });
-      refresh();
+      item.decided = true;
+      render();
     };
     return b;
   }
 
-  refresh();
-  setInterval(function () { if (!document.hidden) refresh(); }, 4000);
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) refresh(); });
+  fetchPending();
+  setInterval(function () { if (!document.hidden) fetchPending(); }, 4000);
+  setInterval(function () { if (!document.hidden) render(); }, 1000);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) fetchPending(); });
 })();
 </script>
 </body>
