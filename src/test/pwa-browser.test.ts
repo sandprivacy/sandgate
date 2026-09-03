@@ -124,6 +124,78 @@ for (const scenario of ["fragment", "legacy-storage"] as const) {
   });
 }
 
+test("ask_human: the input card round-trips a typed answer", async () => {
+  const relay = await startRelay({
+    port: 0,
+    stateDir: mkdtempSync(join(tmpdir(), "sandgate-relay-")),
+  });
+  const relayUrl = `http://localhost:${relay.port}`;
+  try {
+    const pairing = newPairing();
+    const { window, alerts, close } = await loadPage(relayUrl, {
+      hash: `#p=${pairing.pairId}&s=${pairing.secret}`,
+    });
+    try {
+      const approver = new PwaApprover({
+        relayUrl,
+        pairId: pairing.pairId,
+        secret: pairing.secret,
+      });
+      const asked = approver.ask!({
+        title: "What is the SMS code?",
+        body: "Sent to your real number",
+        timeoutSec: 15,
+      });
+
+      const input = await waitFor(() => window.document.querySelector(".card .answer-input"));
+      assert.match(window.document.querySelector(".card .who").textContent, /question/);
+      input.value = "  847291 ";
+      const sendBtn = window.document.querySelector(".card button.ok");
+      sendBtn.click();
+
+      const result = await asked;
+      assert.deepEqual(alerts, [], `page alerted: ${alerts.join(" | ")}`);
+      assert.deepEqual(result, { answer: "847291", decision: "answered" });
+      await waitFor(() => window.document.querySelector(".hrow .d.answered"));
+    } finally {
+      close();
+    }
+  } finally {
+    relay.close();
+  }
+});
+
+test("ask_human: denying returns no answer", async () => {
+  const relay = await startRelay({
+    port: 0,
+    stateDir: mkdtempSync(join(tmpdir(), "sandgate-relay-")),
+  });
+  const relayUrl = `http://localhost:${relay.port}`;
+  try {
+    const pairing = newPairing();
+    const { window, alerts, close } = await loadPage(relayUrl, {
+      hash: `#p=${pairing.pairId}&s=${pairing.secret}`,
+    });
+    try {
+      const approver = new PwaApprover({
+        relayUrl,
+        pairId: pairing.pairId,
+        secret: pairing.secret,
+      });
+      const asked = approver.ask!({ title: "Secret question", timeoutSec: 15 });
+      const denyBtn = await waitFor(() => window.document.querySelector(".card button.no"));
+      denyBtn.click();
+      const result = await asked;
+      assert.deepEqual(result, { answer: null, decision: "denied" });
+      assert.deepEqual(alerts, [], `page alerted: ${alerts.join(" | ")}`);
+    } finally {
+      close();
+    }
+  } finally {
+    relay.close();
+  }
+});
+
 test("Deny works and corrupt stored pairings do not break the page", async () => {
   const relay = await startRelay({
     port: 0,

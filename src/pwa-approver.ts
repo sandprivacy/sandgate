@@ -1,13 +1,15 @@
 import { randomBytes } from "node:crypto";
-import type { Approver, ApprovalRequest, ApprovalResult } from "./telegram.js";
+import type { Approver, ApprovalRequest, ApprovalResult, AskResult } from "./telegram.js";
 import { deriveKey, seal, open, aadForRequest, aadForDecision } from "./pwacrypto.js";
 
 /**
  * Approval channel backed by the paired phone PWA, through a relay that
- * only ever sees sealed blobs. The decision comes back authenticated by
- * the pairing key (AAD binds it to this exact request id), so a malicious
+ * only ever sees sealed blobs. Two request kinds share the same tunnel:
+ * "approval" (tap yes/no) and "input" (the human types an answer — SMS
+ * codes, security questions). Decisions come back authenticated by the
+ * pairing key (AAD binds them to this exact request id), so a malicious
  * or compromised relay can delay or drop an answer — turning it into a
- * deny — but never forge an approval.
+ * deny — but never forge one.
  */
 
 export interface PwaConfig {
@@ -19,6 +21,7 @@ export interface PwaConfig {
 interface DecisionPayload {
   requestId: string;
   approved: boolean;
+  answer?: string;
   ts: number;
 }
 
@@ -33,11 +36,15 @@ export class PwaApprover implements Approver {
     return this.config.relayUrl.replace(/\/$/, "") + path;
   }
 
-  async request(req: ApprovalRequest): Promise<ApprovalResult> {
+  /** Post a sealed request and long-poll its sealed decision (or null on timeout). */
+  private async roundTrip(
+    kind: "approval" | "input",
+    req: ApprovalRequest
+  ): Promise<DecisionPayload | null> {
     const requestId = randomBytes(16).toString("base64url");
     const sealed = seal(
       this.key,
-      { title: req.title, body: req.body, timeoutSec: req.timeoutSec, ts: Date.now() },
+      { kind, title: req.title, body: req.body, timeoutSec: req.timeoutSec, ts: Date.now() },
       aadForRequest(requestId)
     );
 
@@ -62,11 +69,26 @@ export class PwaApprover implements Approver {
       const { payload } = (await res.json()) as { payload: any };
       const decision = open<DecisionPayload>(this.key, payload, aadForDecision(requestId));
       if (decision.requestId !== requestId) continue; // belt and suspenders; AAD already binds it
-      return {
-        approved: decision.approved,
-        decision: decision.approved ? "approved" : "denied",
-      };
+      return decision;
     }
-    return { approved: false, decision: "timeout" };
+    return null;
+  }
+
+  async request(req: ApprovalRequest): Promise<ApprovalResult> {
+    const decision = await this.roundTrip("approval", req);
+    if (!decision) return { approved: false, decision: "timeout" };
+    return {
+      approved: decision.approved,
+      decision: decision.approved ? "approved" : "denied",
+    };
+  }
+
+  async ask(req: ApprovalRequest): Promise<AskResult> {
+    const decision = await this.roundTrip("input", req);
+    if (!decision) return { answer: null, decision: "timeout" };
+    if (!decision.approved || typeof decision.answer !== "string") {
+      return { answer: null, decision: "denied" };
+    }
+    return { answer: decision.answer, decision: "answered" };
   }
 }

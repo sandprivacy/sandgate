@@ -79,6 +79,52 @@ export async function serve(passphrase: string): Promise<void> {
   );
 
   server.registerTool(
+    "ask_human",
+    {
+      title: "Ask the human a question",
+      description:
+        "Ask the human for a short piece of information only they have: a " +
+        "code received by SMS on their real phone number, the answer to a " +
+        "security question, a choice between options. Their answer is typed " +
+        "on their phone and returned over the same end-to-end-encrypted " +
+        "channel as approvals. No answer within the timeout means denied.",
+      inputSchema: {
+        question: z.string().describe("The question shown to the human"),
+        context: z.string().optional().describe("Extra context shown under the question"),
+        timeout_sec: z.number().int().min(10).max(600).optional(),
+      },
+    },
+    async ({ question, context, timeout_sec }) => {
+      try {
+        const approver = needApprover();
+        if (!approver.ask) {
+          return refusal(
+            "Input requests need the PWA approval channel. Pair a phone with `sandgate pair <relay-url>`."
+          );
+        }
+        const result = await approver.ask({
+          title: question,
+          body: context,
+          timeoutSec: timeout_sec ?? config.approvalTimeoutSec,
+        });
+        // The answer itself is never audited — it may be a code or a secret.
+        audit({ tool: "ask_human", action: question, decision: result.decision === "answered" ? "approved" : result.decision === "denied" ? "denied" : "timeout" });
+        if (result.decision !== "answered") {
+          return refusal(
+            result.decision === "timeout"
+              ? "The human did not answer in time."
+              : "The human declined to answer."
+          );
+        }
+        return text({ ok: true, answered: true, answer: result.answer });
+      } catch (err) {
+        audit({ tool: "ask_human", action: question, decision: "error", detail: String(err) });
+        return refusal(String(err));
+      }
+    }
+  );
+
+  server.registerTool(
     "get_totp",
     {
       title: "Get a 2FA code",

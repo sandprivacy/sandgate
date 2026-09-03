@@ -21,8 +21,18 @@ export interface ApprovalResult {
   decision: "approved" | "denied" | "timeout";
 }
 
+export interface AskResult {
+  answer: string | null;
+  decision: "answered" | "denied" | "timeout";
+}
+
 export interface Approver {
   request(req: ApprovalRequest): Promise<ApprovalResult>;
+  /**
+   * Free-text question to the human (SMS codes, security questions,
+   * choices). Optional: the PWA channel implements it; Telegram does not.
+   */
+  ask?(req: ApprovalRequest): Promise<AskResult>;
 }
 
 interface PendingApproval {

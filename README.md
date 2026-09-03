@@ -44,9 +44,10 @@ claude mcp add sandgate -e SANDGATE_PASSPHRASE=your-passphrase -- sandgate serve
 
 That's it. Your agent now has four new tools.
 
-## The four tools
+## The five tools
 
 - **`request_approval`** — "May I pay €300 on this site?" → push to your phone → approve/deny. No answer = denied.
+- **`ask_human`** — "What's the code you received by SMS?" → your phone shows an input field → your typed answer returns over the same encrypted channel. Covers SMS codes on your *real* number (no VoIP numbers that sites reject), security questions, choices.
 - **`get_totp`** — the current 6-digit code for a domain. Per-domain policy: `auto` (trusted sites), `approve` (buzz first — the default), or `deny`. The seed itself is never exposed.
 - **`create_identity`** — a disposable email inbox so the agent can sign up for services without your real address.
 - **`wait_for_verification`** — long-polls that inbox and returns the extracted verification code and links the moment they arrive.

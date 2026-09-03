@@ -220,8 +220,18 @@ export const PWA_HTML = `<!doctype html>
   .hrow .t { flex: 1; color: #cfc6b2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .hrow .d { font-weight: 650; font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase; }
   .d.approved { color: #7fbf9a; }
+  .d.answered { color: #7fbf9a; }
   .d.denied { color: #d98a76; }
   .d.expired { color: var(--soft); }
+
+  .answer-input {
+    width: 100%; box-sizing: border-box; padding: 12px 14px; margin: 0 0 12px;
+    background: var(--panel-raised); border: 1px solid var(--line); border-radius: 10px;
+    /* 16px minimum: below that, iOS Safari auto-zooms into focused inputs. */
+    color: var(--ink); font: 16px ui-monospace, monospace;
+  }
+  .answer-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .answer-input:disabled { opacity: .5; }
 </style>
 </head>
 <body>
@@ -591,16 +601,28 @@ export const PWA_HTML = `<!doctype html>
   }
 
   function addCard(id, p, requestId, req) {
+    var isInput = req.kind === "input";
     var card = document.createElement("div");
     card.className = "card";
 
     var who = document.createElement("div"); who.className = "who";
-    who.textContent = (pairs.length > 1 ? p.name + " · " : "") + "agent · approval request";
+    who.textContent =
+      (pairs.length > 1 ? p.name + " · " : "") +
+      (isInput ? "agent · question" : "agent · approval request");
     card.appendChild(who);
     var h = document.createElement("h2"); h.textContent = req.title; card.appendChild(h);
     // NOTE: never name this variable p — var is function-scoped and would
     // shadow the pairing parameter for the rest of addCard (real bug once).
     if (req.body) { var bodyP = document.createElement("p"); bodyP.textContent = req.body; card.appendChild(bodyP); }
+
+    var input = null;
+    if (isInput) {
+      input = document.createElement("input");
+      input.className = "answer-input";
+      input.placeholder = "Your answer";
+      input.autocomplete = "off";
+      card.appendChild(input);
+    }
 
     var timer = document.createElement("div"); timer.className = "timer";
     var left = document.createElement("div"); left.className = "left";
@@ -610,13 +632,32 @@ export const PWA_HTML = `<!doctype html>
     card.appendChild(timer);
 
     var row = document.createElement("div"); row.className = "row";
-    row.appendChild(makeBtn("Approve", "ok", CHECK, id));
-    row.appendChild(makeBtn("Deny", "no", CROSS, id));
+    if (isInput) {
+      var sendBtn = makeActionBtn("Send", "ok", CHECK, function (btn) {
+        var value = input.value.trim();
+        if (!value) { input.focus(); return; }
+        submitDecision(id, { requestId: requestId, approved: true, answer: value, ts: Date.now() }, "answered", btn);
+      });
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") sendBtn.click();
+      });
+      row.appendChild(sendBtn);
+      row.appendChild(makeActionBtn("Deny", "no", CROSS, function (btn) {
+        submitDecision(id, { requestId: requestId, approved: false, ts: Date.now() }, "denied", btn);
+      }));
+    } else {
+      row.appendChild(makeActionBtn("Approve", "ok", CHECK, function (btn) {
+        submitDecision(id, { requestId: requestId, approved: true, ts: Date.now() }, "approved", btn);
+      }));
+      row.appendChild(makeActionBtn("Deny", "no", CROSS, function (btn) {
+        submitDecision(id, { requestId: requestId, approved: false, ts: Date.now() }, "denied", btn);
+      }));
+    }
     card.appendChild(row);
 
     ensureEmpty(false);
     listEl.appendChild(card);
-    cards[id] = { el: card, leftEl: left, fillEl: fill, barEl: bar, rowEl: row, req: req, pair: p, requestId: requestId, done: false };
+    cards[id] = { el: card, leftEl: left, fillEl: fill, barEl: bar, rowEl: row, inputEl: input, req: req, pair: p, requestId: requestId, done: false };
     tickOne(cards[id]);
   }
 
@@ -628,6 +669,7 @@ export const PWA_HTML = `<!doctype html>
         c.done = true;
         c.el.classList.add("expired");
         c.rowEl.remove();
+        if (c.inputEl) c.inputEl.disabled = true;
         c.leftEl.textContent = "expired — denied";
         c.fillEl.style.width = "0%";
         recordHist(histLabel(c), "expired");
@@ -642,39 +684,37 @@ export const PWA_HTML = `<!doctype html>
     for (var id in cards) tickOne(cards[id]);
   }, 1000);
 
-  function makeBtn(label, cls, icon, id) {
+  function makeActionBtn(label, cls, icon, onTap) {
     var b = document.createElement("button");
     b.className = cls;
     b.innerHTML = icon + "<span></span>";
     b.querySelector("span").textContent = label;
-    b.onclick = async function () {
-      var c = cards[id];
-      if (!c || c.done) return;
-      b.disabled = true;
-      try {
-        var payload = await sealPayload(
-          c.pair,
-          { requestId: c.requestId, approved: cls === "ok", ts: Date.now() },
-          "dec:" + c.requestId
-        );
-        var res = await fetch("/api/decision", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pairId: c.pair.pairId, requestId: c.requestId, payload: payload }),
-        });
-        if (!res.ok) throw new Error("relay answered HTTP " + res.status);
-        if (cards[id]) {
-          recordHist(histLabel(c), cls === "ok" ? "approved" : "denied");
-          cards[id].el.remove();
-          delete cards[id];
-        }
-        ensureEmpty(Object.keys(cards).length === 0);
-      } catch (err) {
-        b.disabled = false;
-        alert("Could not send your decision: " + (err && err.message ? err.message : err));
-      }
-    };
+    b.onclick = function () { onTap(b); };
     return b;
+  }
+
+  async function submitDecision(id, decisionBody, histDecision, btn) {
+    var c = cards[id];
+    if (!c || c.done) return;
+    btn.disabled = true;
+    try {
+      var payload = await sealPayload(c.pair, decisionBody, "dec:" + c.requestId);
+      var res = await fetch("/api/decision", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pairId: c.pair.pairId, requestId: c.requestId, payload: payload }),
+      });
+      if (!res.ok) throw new Error("relay answered HTTP " + res.status);
+      if (cards[id]) {
+        recordHist(histLabel(c), histDecision);
+        cards[id].el.remove();
+        delete cards[id];
+      }
+      ensureEmpty(Object.keys(cards).length === 0);
+    } catch (err) {
+      btn.disabled = false;
+      alert("Could not send your decision: " + (err && err.message ? err.message : err));
+    }
   }
 
   function histLabel(c) {
