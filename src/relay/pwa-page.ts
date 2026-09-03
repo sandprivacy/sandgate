@@ -6,7 +6,13 @@ import { GLYPH_SVG_RECTS } from "./icons.js";
  * HKDF-SHA256(salt "sandgate-pwa-v1", info "approval-channel") -> AES-256-GCM,
  * AAD "req:<id>" / "dec:<id>". The pairing secret arrives once in the URL
  * fragment (never sent to the relay) and lives in localStorage.
- * No emoji anywhere: the identity is the geometric gate mark from icons.ts.
+ *
+ * Live updates: SSE (/api/events) with a slow safety poll — no visible
+ * refresh; the DOM is stable and only countdown text/bars mutate in place.
+ * Onboarding is per-platform: iOS home-screen apps have storage separate
+ * from Safari, so the install flow carries the pairing link by hand
+ * (copy → install → paste); Android installs in place via
+ * beforeinstallprompt and shares storage with the browser.
  */
 
 export const PWA_MANIFEST = JSON.stringify({
@@ -25,6 +31,8 @@ export const PWA_MANIFEST = JSON.stringify({
 export const PWA_SW = `
 self.addEventListener("install", function () { self.skipWaiting(); });
 self.addEventListener("activate", function (e) { e.waitUntil(self.clients.claim()); });
+// A fetch handler is required for Chrome's install prompt; plain passthrough.
+self.addEventListener("fetch", function (e) { e.respondWith(fetch(e.request)); });
 self.addEventListener("push", function (e) {
   e.waitUntil((async function () {
     await self.registration.showNotification("sandgate", {
@@ -62,6 +70,7 @@ export const PWA_HTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="sandgate">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#141210">
 <link rel="manifest" href="/manifest.webmanifest">
@@ -122,6 +131,18 @@ export const PWA_HTML = `<!doctype html>
 
   main { max-width: 520px; margin: 0 auto; padding: 18px 16px calc(env(safe-area-inset-bottom, 0px) + 40px); }
 
+  .banner {
+    background: var(--panel-raised); border: 1px solid #4a3d1f; border-radius: 14px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  .banner h2 { font-size: 15.5px; margin: 0 0 8px; color: var(--accent); }
+  .banner ol { margin: 0 0 12px; padding-left: 20px; font-size: 14px; color: #cfc6b2; }
+  .banner ol li { margin-bottom: 4px; }
+  .banner .act {
+    width: 100%; padding: 12px; border: 0; border-radius: 10px; cursor: pointer;
+    background: var(--accent); color: #1a1508; font: 650 15px/1 inherit; font-family: inherit;
+  }
+
   .card {
     background: var(--panel);
     border: 1px solid var(--line);
@@ -141,15 +162,15 @@ export const PWA_HTML = `<!doctype html>
   .bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; transition: width 1s linear; }
   .bar.low i { background: var(--no); }
   .row { display: flex; gap: 10px; }
-  button {
+  .card button {
     flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px;
     padding: 13px; font-size: 15.5px; font-weight: 650;
     border: 0; border-radius: 10px; cursor: pointer; color: #fff;
     font-family: inherit; letter-spacing: .01em;
     transition: transform .06s ease;
   }
-  button:active { transform: scale(.97); }
-  button:disabled { opacity: .5; }
+  .card button:active { transform: scale(.97); }
+  .card button:disabled { opacity: .5; }
   .ok { background: var(--ok); } .ok:active { background: var(--ok-press); }
   .no { background: var(--no); } .no:active { background: var(--no-press); }
   .expired { opacity: .45; }
@@ -160,13 +181,20 @@ export const PWA_HTML = `<!doctype html>
   .empty .big { font-size: 16px; color: #cfc6b2; margin-bottom: 4px; }
   .empty .hint { font-size: 13px; }
 
-  .setup { text-align: center; padding: 60px 24px; color: #cfc6b2; }
+  .setup { text-align: center; padding: 48px 8px; color: #cfc6b2; }
   .setup .mark { color: var(--accent); opacity: .5; margin-bottom: 16px; }
+  .setup p { font-size: 14.5px; margin: 0 0 14px; }
   .setup code {
-    display: inline-block; margin-top: 10px; padding: 8px 14px; border-radius: 8px;
+    display: inline-block; padding: 8px 14px; border-radius: 8px;
     background: var(--panel-raised); border: 1px solid var(--line);
     font: 14px ui-monospace, "Cascadia Mono", monospace; color: var(--accent);
   }
+  .setup input {
+    width: 100%; padding: 12px 14px; margin: 14px 0 10px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    color: var(--ink); font: 14px ui-monospace, monospace;
+  }
+  .setup input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 </style>
 </head>
 <body>
@@ -178,7 +206,7 @@ export const PWA_HTML = `<!doctype html>
   </div>
   <div class="pill warn" id="status">starting</div>
 </header>
-<main><div id="list"></div></main>
+<main><div id="banner"></div><div id="list"></div></main>
 <script>
 (function () {
   var PAIR_KEY = "sandgate_pair";
@@ -201,26 +229,91 @@ export const PWA_HTML = `<!doctype html>
 
   var statusEl = document.getElementById("status");
   var listEl = document.getElementById("list");
+  var bannerEl = document.getElementById("banner");
   function setStatus(text, cls) {
     statusEl.textContent = text;
     statusEl.className = "pill" + (cls ? " " + cls : "");
   }
 
+  var standalone =
+    (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) ||
+    window.navigator.standalone === true;
+  var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  var isAndroid = /Android/.test(navigator.userAgent);
+
   // --- pairing -------------------------------------------------------------
-  var pair = null;
-  var m = location.hash.match(/p=([A-Za-z0-9_-]+)&s=([A-Za-z0-9_-]+)/);
-  if (m) {
-    pair = { pairId: m[1], secret: m[2] };
+  function parsePairing(text) {
+    var mm = String(text).match(/p=([A-Za-z0-9_-]{8,64})&s=([A-Za-z0-9_-]{8,})/);
+    return mm ? { pairId: mm[1], secret: mm[2] } : null;
+  }
+  var pair = parsePairing(location.hash);
+  if (pair) {
     try { localStorage.setItem(PAIR_KEY, JSON.stringify(pair)); } catch (e) {}
     history.replaceState(null, "", location.pathname);
   } else {
     try { pair = JSON.parse(localStorage.getItem(PAIR_KEY)); } catch (e) {}
   }
+
   if (!pair) {
     setStatus("not paired", "err");
-    listEl.innerHTML = '<div class="setup"><div class="mark">' + GLYPH + '</div>Not paired yet.<br>On your computer, run<br><code>sandgate pair</code><br><br>then open the link it prints on this device.</div>';
+    var setup = document.createElement("div");
+    setup.className = "setup";
+    setup.innerHTML =
+      '<div class="mark">' + GLYPH + '</div>' +
+      '<p>Not paired yet. On your computer, run</p><code>sandgate pair</code>' +
+      '<p style="margin-top:14px">then open the link it prints on this device —<br>or paste it here:</p>' +
+      '<input id="pasteLink" placeholder="https://relay…/#p=…&s=…" autocomplete="off">';
+    listEl.appendChild(setup);
+    document.getElementById("pasteLink").addEventListener("input", function (e) {
+      var parsed = parsePairing(e.target.value);
+      if (parsed) {
+        try { localStorage.setItem(PAIR_KEY, JSON.stringify(parsed)); } catch (err) {}
+        location.replace(location.pathname);
+      }
+    });
     return;
   }
+
+  var pairLink = location.origin + "/#p=" + pair.pairId + "&s=" + pair.secret;
+
+  // --- install guidance (mobile browser, not yet installed) ---------------
+  var deferredInstall = null;
+  window.addEventListener("beforeinstallprompt", function (e) {
+    e.preventDefault();
+    deferredInstall = e;
+    renderBanner();
+  });
+
+  function renderBanner() {
+    if (standalone || (!isIOS && !isAndroid)) { bannerEl.textContent = ""; return; }
+    var b = document.createElement("div");
+    b.className = "banner";
+    if (isIOS) {
+      b.innerHTML =
+        '<h2>Install sandgate to get push notifications</h2>' +
+        '<ol><li>Tap the button below to copy your pairing link</li>' +
+        '<li>Tap Share, then "Add to Home Screen"</li>' +
+        '<li>Open sandgate from your home screen and paste the link</li></ol>' +
+        '<button class="act" id="copyLink">Copy pairing link</button>';
+      bannerEl.textContent = ""; bannerEl.appendChild(b);
+      document.getElementById("copyLink").addEventListener("click", function () {
+        navigator.clipboard.writeText(pairLink).then(function () {
+          document.getElementById("copyLink").textContent = "Copied — now: Share → Add to Home Screen";
+        });
+      });
+    } else {
+      b.innerHTML =
+        '<h2>Install sandgate to get push notifications</h2>' +
+        '<ol><li>Install the app (your pairing carries over automatically)</li>' +
+        '<li>Open it from your home screen and allow notifications</li></ol>' +
+        '<button class="act" id="installBtn">' + (deferredInstall ? "Install the app" : "Open browser menu → Install app") + '</button>';
+      bannerEl.textContent = ""; bannerEl.appendChild(b);
+      document.getElementById("installBtn").addEventListener("click", function () {
+        if (deferredInstall) deferredInstall.prompt();
+      });
+    }
+  }
+  renderBanner();
 
   // --- crypto (mirror of pwacrypto.ts) ------------------------------------
   var keyPromise = (async function () {
@@ -255,6 +348,7 @@ export const PWA_HTML = `<!doctype html>
   }
 
   // --- push subscription ---------------------------------------------------
+  var pushOn = false;
   (async function () {
     try {
       if ("serviceWorker" in navigator) {
@@ -262,7 +356,7 @@ export const PWA_HTML = `<!doctype html>
         navigator.serviceWorker.addEventListener("message", function (e) {
           if (e.data === "refresh") fetchPending();
         });
-        if ("PushManager" in window) {
+        if ("PushManager" in window && (standalone || !isIOS)) {
           var perm = await Notification.requestPermission();
           if (perm === "granted") {
             var vapid = await (await fetch("/api/vapid")).json();
@@ -275,107 +369,148 @@ export const PWA_HTML = `<!doctype html>
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ pairId: pair.pairId, subscription: sub }),
             });
+            pushOn = true;
             setStatus("push on");
             return;
           }
         }
       }
-      setStatus("polling — keep open", "warn");
-    } catch (e) {
-      setStatus("polling — keep open", "warn");
-    }
+    } catch (e) { /* fall through to live/polling status */ }
+    if (!pushOn) setStatus(sseOn ? "live" : "polling", "warn");
   })();
 
-  // --- approval list -------------------------------------------------------
-  var items = []; // [{requestId, req:{title,body,timeoutSec,ts}, decided}]
+  // --- live updates: SSE with a slow safety poll ---------------------------
+  var sseOn = false;
+  function connectEvents() {
+    if (!("EventSource" in window)) return;
+    var es = new EventSource("/api/events?pairId=" + encodeURIComponent(pair.pairId));
+    es.addEventListener("request", fetchPending);
+    es.addEventListener("decision", fetchPending);
+    es.onopen = function () {
+      sseOn = true;
+      if (!pushOn) setStatus("live");
+    };
+    es.onerror = function () {
+      sseOn = false;
+      if (!pushOn) setStatus("polling", "warn");
+      // EventSource reconnects on its own (retry: 3000).
+    };
+  }
+  connectEvents();
+  setInterval(function () { if (!document.hidden && !sseOn) fetchPending(); }, 8000);
+  setInterval(function () { if (!document.hidden) fetchPending(); }, 45000); // safety net
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) fetchPending(); });
+
+  // --- approval cards: stable DOM, in-place countdowns ---------------------
+  var cards = {}; // requestId -> {el, leftEl, fillEl, barEl, rowEl, req, done}
+  var emptyEl = null;
+
+  function ensureEmpty(show) {
+    if (show && !emptyEl) {
+      emptyEl = document.createElement("div");
+      emptyEl.className = "empty";
+      emptyEl.innerHTML = '<div class="mark">' + GLYPH + '</div><div class="big">All quiet.</div><div class="hint">When an agent needs you, it shows up here.</div>';
+      listEl.appendChild(emptyEl);
+    } else if (!show && emptyEl) {
+      emptyEl.remove();
+      emptyEl = null;
+    }
+  }
 
   async function fetchPending() {
-    var res, raw;
+    var raw;
     try {
-      res = await fetch("/api/pending?pairId=" + encodeURIComponent(pair.pairId));
-      raw = await res.json();
+      raw = await (await fetch("/api/pending?pairId=" + encodeURIComponent(pair.pairId))).json();
     } catch (e) { return; }
-    var next = [];
+    var seen = {};
     for (var i = 0; i < raw.length; i++) {
-      var existing = items.find(function (x) { return x.requestId === raw[i].requestId; });
-      if (existing) { next.push(existing); continue; }
+      var id = raw[i].requestId;
+      seen[id] = true;
+      if (cards[id]) continue;
       try {
-        var req = await openSealed(raw[i].payload, "req:" + raw[i].requestId);
-        next.push({ requestId: raw[i].requestId, req: req, decided: false });
+        var req = await openSealed(raw[i].payload, "req:" + id);
+        addCard(id, req);
       } catch (e) { /* not ours / tampered */ }
     }
-    items = next;
-    render();
+    for (var cid in cards) {
+      if (!seen[cid]) { cards[cid].el.remove(); delete cards[cid]; }
+    }
+    ensureEmpty(Object.keys(cards).length === 0);
   }
 
-  function render() {
-    listEl.textContent = "";
-    var active = items.filter(function (x) { return !x.decided; });
-    if (!active.length) {
-      var empty = document.createElement("div");
-      empty.className = "empty";
-      empty.innerHTML = '<div class="mark">' + GLYPH + '</div><div class="big">All quiet.</div><div class="hint">When an agent needs you, it shows up here.</div>';
-      listEl.appendChild(empty);
+  function addCard(id, req) {
+    var card = document.createElement("div");
+    card.className = "card";
+
+    var who = document.createElement("div"); who.className = "who";
+    who.textContent = "agent · approval request"; card.appendChild(who);
+    var h = document.createElement("h2"); h.textContent = req.title; card.appendChild(h);
+    if (req.body) { var p = document.createElement("p"); p.textContent = req.body; card.appendChild(p); }
+
+    var timer = document.createElement("div"); timer.className = "timer";
+    var left = document.createElement("div"); left.className = "left";
+    var bar = document.createElement("div"); bar.className = "bar";
+    var fill = document.createElement("i");
+    bar.appendChild(fill); timer.appendChild(left); timer.appendChild(bar);
+    card.appendChild(timer);
+
+    var row = document.createElement("div"); row.className = "row";
+    row.appendChild(makeBtn("Approve", "ok", CHECK, id));
+    row.appendChild(makeBtn("Deny", "no", CROSS, id));
+    card.appendChild(row);
+
+    ensureEmpty(false);
+    listEl.appendChild(card);
+    cards[id] = { el: card, leftEl: left, fillEl: fill, barEl: bar, rowEl: row, req: req, done: false };
+    tickOne(cards[id]);
+  }
+
+  function tickOne(c) {
+    var total = c.req.timeoutSec * 1000;
+    var remaining = Math.max(0, c.req.ts + total - Date.now());
+    if (remaining <= 0) {
+      if (!c.done) {
+        c.done = true;
+        c.el.classList.add("expired");
+        c.rowEl.remove();
+        c.leftEl.textContent = "expired — denied";
+        c.fillEl.style.width = "0%";
+      }
       return;
     }
-    active.forEach(function (item) {
-      var req = item.req;
-      var total = req.timeoutSec * 1000;
-      var remaining = Math.max(0, req.ts + total - Date.now());
-      var card = document.createElement("div");
-      card.className = "card" + (remaining <= 0 ? " expired" : "");
-
-      var who = document.createElement("div"); who.className = "who";
-      who.textContent = "agent · approval request"; card.appendChild(who);
-      var h = document.createElement("h2"); h.textContent = req.title; card.appendChild(h);
-      if (req.body) { var p = document.createElement("p"); p.textContent = req.body; card.appendChild(p); }
-
-      var timer = document.createElement("div"); timer.className = "timer";
-      var left = document.createElement("div"); left.className = "left";
-      var secs = Math.ceil(remaining / 1000);
-      left.textContent = remaining > 0 ? secs + "s — then denied" : "expired — denied";
-      var bar = document.createElement("div"); bar.className = "bar" + (remaining > 0 && remaining < total * .25 ? " low" : "");
-      var fill = document.createElement("i");
-      fill.style.width = Math.max(0, Math.min(100, (remaining / total) * 100)) + "%";
-      bar.appendChild(fill); timer.appendChild(left); timer.appendChild(bar);
-      card.appendChild(timer);
-
-      if (remaining > 0) {
-        var row = document.createElement("div"); row.className = "row";
-        row.appendChild(makeBtn("Approve", "ok", CHECK, item));
-        row.appendChild(makeBtn("Deny", "no", CROSS, item));
-        card.appendChild(row);
-      }
-      listEl.appendChild(card);
-    });
+    c.leftEl.textContent = Math.ceil(remaining / 1000) + "s — then denied";
+    c.fillEl.style.width = Math.min(100, (remaining / total) * 100) + "%";
+    c.barEl.className = "bar" + (remaining < total * 0.25 ? " low" : "");
   }
+  setInterval(function () {
+    for (var id in cards) tickOne(cards[id]);
+  }, 1000);
 
-  function makeBtn(label, cls, icon, item) {
+  function makeBtn(label, cls, icon, id) {
     var b = document.createElement("button");
     b.className = cls;
     b.innerHTML = icon + "<span></span>";
     b.querySelector("span").textContent = label;
     b.onclick = async function () {
+      var c = cards[id];
+      if (!c || c.done) return;
       b.disabled = true;
       var payload = await sealPayload(
-        { requestId: item.requestId, approved: cls === "ok", ts: Date.now() },
-        "dec:" + item.requestId
+        { requestId: id, approved: cls === "ok", ts: Date.now() },
+        "dec:" + id
       );
       await fetch("/api/decision", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pairId: pair.pairId, requestId: item.requestId, payload: payload }),
+        body: JSON.stringify({ pairId: pair.pairId, requestId: id, payload: payload }),
       });
-      item.decided = true;
-      render();
+      if (cards[id]) { cards[id].el.remove(); delete cards[id]; }
+      ensureEmpty(Object.keys(cards).length === 0);
     };
     return b;
   }
 
   fetchPending();
-  setInterval(function () { if (!document.hidden) fetchPending(); }, 4000);
-  setInterval(function () { if (!document.hidden) render(); }, 1000);
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) fetchPending(); });
 })();
 </script>
 </body>

@@ -92,6 +92,42 @@ test("full approval round-trip through the relay (approve, deny, timeout)", asyn
   }
 });
 
+test("SSE stream announces new requests to listening pages", async () => {
+  const relay = await startRelay({
+    port: 0,
+    stateDir: mkdtempSync(join(tmpdir(), "sandgate-relay-")),
+  });
+  const relayUrl = `http://localhost:${relay.port}`;
+  try {
+    const pairing = newPairing();
+    const res = await fetch(`${relayUrl}/api/events?pairId=${pairing.pairId}`);
+    assert.equal(res.headers.get("content-type"), "text/event-stream");
+    const reader = res.body!.getReader();
+
+    const approver = new PwaApprover({
+      relayUrl,
+      pairId: pairing.pairId,
+      secret: pairing.secret,
+    });
+    const pendingRequest = approver
+      .request({ title: "SSE ping", timeoutSec: 1 })
+      .catch(() => {});
+
+    let streamed = "";
+    const deadline = Date.now() + 5000;
+    while (!streamed.includes("event: request") && Date.now() < deadline) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      streamed += new TextDecoder().decode(value);
+    }
+    assert.ok(streamed.includes("event: request"), `stream was: ${streamed}`);
+    reader.cancel();
+    await pendingRequest;
+  } finally {
+    relay.close();
+  }
+});
+
 test("a relay cannot forge an approval (bad blob is rejected, request times out)", async () => {
   const relay = await startRelay({
     port: 0,

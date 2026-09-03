@@ -24,6 +24,8 @@ interface RelayRequestEntry {
 interface Pairing {
   subscription?: webpush.PushSubscription;
   requests: Map<string, RelayRequestEntry>;
+  /** Open SSE responses from PWA pages; notified on new requests/decisions. */
+  listeners: Set<ServerResponse>;
 }
 
 const MAX_BODY = 64 * 1024;
@@ -54,10 +56,20 @@ export async function startRelay(opts: {
   const getPairing = (pairId: string): Pairing => {
     let p = pairings.get(pairId);
     if (!p) {
-      p = { subscription: state.subscriptions[pairId], requests: new Map() };
+      p = {
+        subscription: state.subscriptions[pairId],
+        requests: new Map(),
+        listeners: new Set(),
+      };
       pairings.set(pairId, p);
     }
     return p;
+  };
+
+  const notifyListeners = (pairing: Pairing, event: string) => {
+    for (const listener of pairing.listeners) {
+      listener.write(`event: ${event}\ndata: {}\n\n`);
+    }
   };
 
   const gc = setInterval(() => {
@@ -180,7 +192,30 @@ export async function startRelay(opts: {
             .sendNotification(pairing.subscription, JSON.stringify({ type: "approval" }))
             .catch(() => {}); // phone offline / stale sub — PWA polls anyway
         }
+        notifyListeners(pairing, "request");
         return json(res, 200, { ok: true });
+      }
+
+      // SSE stream for open PWA pages: instant updates instead of polling.
+      if (req.method === "GET" && url.pathname === "/api/events") {
+        const pairId = url.searchParams.get("pairId") ?? "";
+        if (!validId(pairId)) return json(res, 400, { error: "bad pairId" });
+        const pairing = getPairing(pairId);
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        });
+        res.write("retry: 3000\n\n");
+        pairing.listeners.add(res);
+        // Heartbeat keeps proxies (and our own 90s read timeout) from
+        // cutting an idle stream; EventSource ignores comment lines.
+        const heartbeat = setInterval(() => res.write(": hb\n\n"), 25_000);
+        req.on("close", () => {
+          clearInterval(heartbeat);
+          pairing.listeners.delete(res);
+        });
+        return;
       }
 
       if (req.method === "GET" && url.pathname === "/api/pending") {
@@ -202,6 +237,7 @@ export async function startRelay(opts: {
         if (entry.decision !== undefined) return json(res, 200, { ok: true }); // first tap wins
         entry.decision = body.payload;
         for (const waiter of entry.waiters.splice(0)) waiter(body.payload);
+        notifyListeners(getPairing(body.pairId), "decision");
         return json(res, 200, { ok: true });
       }
 
