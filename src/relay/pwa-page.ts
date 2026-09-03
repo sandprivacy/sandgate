@@ -208,7 +208,8 @@ export const PWA_HTML = `<!doctype html>
   .setup input {
     width: 100%; padding: 12px 14px; margin: 14px 0 10px;
     background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-    color: var(--ink); font: 14px ui-monospace, monospace;
+    /* 16px minimum: below that, iOS Safari auto-zooms into focused inputs. */
+    color: var(--ink); font: 16px ui-monospace, monospace;
   }
   .setup input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
@@ -711,7 +712,7 @@ export const PWA_HTML = `<!doctype html>
       input.id = "addPaste";
       input.placeholder = "Paste a pairing link (sandgate pair)";
       input.autocomplete = "off";
-      input.style.cssText = "width:100%;padding:10px 12px;margin-top:8px;background:var(--panel);border:1px solid var(--line);border-radius:8px;color:var(--ink);font:13px ui-monospace,monospace;";
+      input.style.cssText = "width:100%;padding:10px 12px;margin-top:8px;background:var(--panel);border:1px solid var(--line);border-radius:8px;color:var(--ink);font:16px ui-monospace,monospace;box-sizing:border-box;";
       input.addEventListener("input", function (e) {
         var parsed = parsePairing(e.target.value);
         if (parsed && addPairing(parsed)) location.reload();
