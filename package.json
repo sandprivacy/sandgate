@@ -16,7 +16,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
-    "test": "npm run build && node --test"
+    "test": "npm run build && node scripts/test.mjs"
   },
   "homepage": "https://sandgate.dev",
   "repository": {
