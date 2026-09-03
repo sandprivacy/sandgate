@@ -1,0 +1,46 @@
+{
+  "name": "@sandprivacy/sandgate",
+  "version": "0.1.0",
+  "description": "The human gateway for AI agents — approvals, 2FA codes and email verification, self-hosted. Your agent asks; you decide; secrets never touch the LLM.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "bin": {
+    "sandgate": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "test": "npm run build && node --test \"dist/test/*.test.js\""
+  },
+  "keywords": [
+    "mcp",
+    "ai-agents",
+    "human-in-the-loop",
+    "2fa",
+    "totp",
+    "approval",
+    "email-verification",
+    "browser-use",
+    "claude"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "otpauth": "^9.5.1",
+    "read": "^5.0.1",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}
