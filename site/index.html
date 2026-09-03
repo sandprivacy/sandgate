@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sandgate — the human gateway for AI agents</title>
+<meta name="description" content="Approvals, 2FA codes and email verification for AI agents. One self-hosted MCP server. Your agent asks; your phone decides; secrets never touch the LLM.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23141210'/%3E%3Crect x='18' y='26' width='64' height='8' rx='2.5' fill='%23D9A441'/%3E%3Crect x='26' y='42' width='48' height='6' rx='2.5' fill='%23D9A441'/%3E%3Crect x='30' y='34' width='8' height='44' rx='2.5' fill='%23D9A441'/%3E%3Crect x='62' y='34' width='8' height='44' rx='2.5' fill='%23D9A441'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&display=swap">
+<style>
+  :root {
+    --ground: #141210;
+    --panel: #1e1b16;
+    --panel-raised: #262219;
+    --line: #35301f;
+    --ink: #efe9db;
+    --soft: #a69c85;
+    --accent: #d9a441;
+    --ok: #3f9169;
+    --no: #c2563e;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font: 16px/1.6 -apple-system, "Segoe UI", Roboto, system-ui, sans-serif;
+  }
+  .display { font-family: "Bricolage Grotesque", "Arial Black", sans-serif; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+
+  nav { display: flex; align-items: center; gap: 12px; padding: 22px 0; }
+  .mark { color: var(--accent); display: grid; place-items: center; }
+  nav .name { font-weight: 800; font-size: 18px; letter-spacing: .01em; }
+  nav .links { margin-left: auto; display: flex; gap: 22px; font-size: 14.5px; }
+  nav .links a { color: var(--soft); } nav .links a:hover { color: var(--ink); text-decoration: none; }
+
+  .hero { padding: 72px 0 56px; text-align: center; }
+  .hero h1 {
+    font-family: "Bricolage Grotesque", sans-serif; font-weight: 800;
+    font-size: clamp(38px, 7vw, 64px); line-height: 1.04; margin: 0 0 18px;
+    letter-spacing: -.01em; text-wrap: balance;
+  }
+  .hero h1 em { font-style: normal; color: var(--accent); }
+  .hero .sub { font-size: 19px; color: var(--soft); max-width: 620px; margin: 0 auto 34px; text-wrap: balance; }
+  .install {
+    display: inline-flex; align-items: center; gap: 14px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 20px; font-size: 15.5px; margin-bottom: 26px;
+  }
+  .install .dollar { color: var(--soft); user-select: none; }
+  .install button {
+    background: none; border: 0; color: var(--soft); cursor: pointer; font-size: 13px;
+    padding: 2px 6px; border-radius: 6px; font-family: inherit;
+  }
+  .install button:hover { color: var(--accent); }
+  .ctas { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 12px 26px; border-radius: 10px; font-weight: 650; font-size: 15.5px;
+  }
+  .btn.primary { background: var(--accent); color: #1a1508; }
+  .btn.primary:hover { text-decoration: none; filter: brightness(1.08); }
+  .btn.ghost { border: 1px solid var(--line); color: var(--ink); background: var(--panel); }
+  .btn.ghost:hover { text-decoration: none; border-color: #4a4230; }
+
+  .demo { display: grid; grid-template-columns: 1.25fr .9fr; gap: 20px; margin: 30px 0 0; text-align: left; }
+  @media (max-width: 720px) { .demo { grid-template-columns: 1fr; } }
+  .term {
+    background: #0f0e0b; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 13.5px; line-height: 1.9; overflow-x: auto;
+  }
+  .term .agent { color: #8fb8d8; }
+  .term .tool { color: var(--accent); }
+  .term .dim { color: #6f6752; }
+  .term .okc { color: #7fbf9a; }
+  .phone {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 16px;
+    display: flex; flex-direction: column; justify-content: center;
+  }
+  .phone .who { font-size: 10.5px; color: var(--accent); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 6px; }
+  .phone h3 { margin: 0 0 4px; font-size: 16.5px; }
+  .phone p { margin: 0 0 12px; font-size: 13.5px; color: #cfc6b2; }
+  .bar { height: 4px; border-radius: 2px; background: var(--line); margin-bottom: 14px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 62%; background: var(--accent); border-radius: 2px; }
+  .phone .row { display: flex; gap: 8px; }
+  .phone .b { flex: 1; text-align: center; padding: 10px; border-radius: 8px; color: #fff; font-weight: 650; font-size: 14px; }
+  .b.ok { background: var(--ok); } .b.no { background: var(--no); }
+
+  section { padding: 56px 0; border-top: 1px solid var(--line); }
+  h2 { font-family: "Bricolage Grotesque", sans-serif; font-weight: 800; font-size: 30px; margin: 0 0 8px; letter-spacing: -.01em; }
+  .lede { color: var(--soft); margin: 0 0 32px; max-width: 640px; }
+
+  .tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+  .tool-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .tool-card code { color: var(--accent); font-size: 14px; }
+  .tool-card p { margin: 8px 0 0; font-size: 14px; color: #cfc6b2; }
+
+  .table-scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 14.5px; }
+  th, td { text-align: left; padding: 10px 16px 10px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--soft); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: .06em; }
+  td.yes { color: #7fbf9a; } td.meh { color: var(--soft); }
+
+  .sec { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 22px; }
+  .sec h3 { font-size: 16px; margin: 0 0 6px; color: var(--accent); }
+  .sec p { margin: 0; font-size: 14.5px; color: #cfc6b2; }
+
+  footer { border-top: 1px solid var(--line); padding: 34px 0 48px; color: var(--soft); font-size: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+  footer .spacer { flex: 1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <span class="mark"><svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4.32" y="6.24" width="15.36" height="1.92" rx="0.6"/><rect x="6.24" y="10.08" width="11.52" height="1.44" rx="0.6"/><rect x="7.2" y="8.16" width="1.92" height="10.56" rx="0.6"/><rect x="14.88" y="8.16" width="1.92" height="10.56" rx="0.6"/></svg></span>
+    <span class="name display">sandgate</span>
+    <span class="links">
+      <a href="https://github.com/sandprivacy/sandgate#readme">Docs</a>
+      <a href="https://github.com/sandprivacy/sandgate">GitHub</a>
+    </span>
+  </nav>
+
+  <div class="hero">
+    <h1>Your agents ask.<br><em>You decide.</em></h1>
+    <p class="sub">Approvals, 2FA codes and email verification for AI agents — one self-hosted MCP server. Your agent asks; your phone decides; secrets never touch the LLM.</p>
+    <div class="install mono">
+      <span class="dollar">$</span><span id="cmd">npm install -g @sandprivacy/sandgate</span>
+      <button onclick="navigator.clipboard.writeText(document.getElementById('cmd').textContent).then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1200)})">copy</button>
+    </div>
+    <div class="ctas">
+      <a class="btn primary" href="https://github.com/sandprivacy/sandgate#quickstart">Get started</a>
+      <a class="btn ghost" href="https://github.com/sandprivacy/sandgate">Star on GitHub</a>
+    </div>
+
+    <div class="demo">
+      <div class="term" aria-label="terminal transcript">
+        <div><span class="agent">agent</span> <span class="dim">›</span> logging in to github.com…</div>
+        <div><span class="agent">agent</span> <span class="dim">›</span> blocked: “enter your 2FA code”</div>
+        <div><span class="tool">sandgate</span> <span class="dim">›</span> get_totp("github.com") — policy: <b>approve</b></div>
+        <div><span class="tool">sandgate</span> <span class="dim">›</span> pushed to your phone…</div>
+        <div><span class="okc">✓ approved by human</span></div>
+        <div><span class="tool">sandgate</span> <span class="dim">›</span> → 483 921 <span class="dim">(30s code — the seed never leaves the vault)</span></div>
+        <div><span class="agent">agent</span> <span class="dim">›</span> logged in. continuing task.</div>
+      </div>
+      <div class="phone" aria-label="phone approval card">
+        <div class="who">agent · approval request</div>
+        <h3>2FA code for github.com</h3>
+        <p>An agent is logging in and requests the current code.</p>
+        <div class="bar"><i></i></div>
+        <div class="row"><span class="b ok">Approve</span><span class="b no">Deny</span></div>
+      </div>
+    </div>
+  </div>
+
+  <section id="tools">
+    <h2>Four tools. Every wall an agent hits.</h2>
+    <p class="lede">Agents stall on everything that needs a human. sandgate turns each wall into one MCP call — with your policy, your tap, and an audit line.</p>
+    <div class="tools">
+      <div class="tool-card"><code>request_approval</code><p>“May I pay €300 on this site?” Push to your phone; no answer within the timeout means denied.</p></div>
+      <div class="tool-card"><code>get_totp</code><p>The current 6-digit code for a domain. Per-domain policy: auto, approve, or deny. The seed is never exposed.</p></div>
+      <div class="tool-card"><code>create_identity</code><p>A disposable email inbox so the agent signs up without your real address — sandmail or your own IMAP.</p></div>
+      <div class="tool-card"><code>wait_for_verification</code><p>Long-polls that inbox and returns the extracted code and links the moment the email lands.</p></div>
+    </div>
+  </section>
+
+  <section id="compare">
+    <h2>Against the .env way</h2>
+    <div class="table-scroll">
+      <table>
+        <tr><th></th><th>DIY (.env + custom tools)</th><th>sandgate</th></tr>
+        <tr><td>TOTP seed storage</td><td class="meh">plaintext</td><td class="yes">encrypted vault (AES-256-GCM, scrypt)</td></tr>
+        <tr><td>What the LLM sees</td><td class="meh">the seed</td><td class="yes">a 30-second code, after policy check</td></tr>
+        <tr><td>Sensitive actions</td><td class="meh">agent decides</td><td class="yes">your phone decides</td></tr>
+        <tr><td>Verification emails</td><td class="meh">build it yourself</td><td class="yes">one tool call</td></tr>
+        <tr><td>Audit trail</td><td class="meh">none</td><td class="yes">every request, decision, outcome</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section id="security">
+    <h2>Built like it doesn't trust anyone</h2>
+    <p class="lede">Including us. The relay that reaches your phone forwards sealed blobs it can neither read nor forge — and there's a test in the repo that proves it.</p>
+    <div class="sec">
+      <div><h3>Zero disclosure</h3><p>The LLM only ever sees derived, short-lived values — a 6-digit code, a yes/no. Never seeds, tokens or passwords.</p></div>
+      <div><h3>Deny by default</h3><p>Unknown domains refuse. Unanswered approvals refuse. A dropped connection refuses.</p></div>
+      <div><h3>End-to-end encrypted</h3><p>The pairing secret travels once, in a URL fragment. HKDF → AES-256-GCM, request id bound into the AAD.</p></div>
+      <div><h3>Self-hosted</h3><p>Vault, policies and audit live on your machine. Run your own relay, or use ours — it's blind either way.</p></div>
+    </div>
+  </section>
+
+  <footer>
+    <span>AGPL-3.0 · part of the sandprivacy suite</span>
+    <span class="spacer"></span>
+    <a href="https://github.com/sandprivacy/sandgate">GitHub</a>
+  </footer>
+</div>
+</body>
+</html>
