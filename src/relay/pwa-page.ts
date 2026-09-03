@@ -15,18 +15,28 @@ import { GLYPH_SVG_RECTS } from "./icons.js";
  * beforeinstallprompt and shares storage with the browser.
  */
 
-export const PWA_MANIFEST = JSON.stringify({
-  name: "sandgate",
-  short_name: "sandgate",
-  start_url: "/",
-  display: "standalone",
-  background_color: "#141210",
-  theme_color: "#141210",
-  icons: [
-    { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
-    { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
-  ],
-});
+/**
+ * Two manifests on purpose. Chrome requires start_url for installability
+ * and shares storage with the installed app, so Android gets "/". iOS home
+ * -screen apps have isolated storage, but WITHOUT a manifest start_url iOS
+ * captures the CURRENT page URL — fragment included. The page keeps the
+ * pairing link in the address bar on iOS Safari, so Add to Home Screen
+ * produces an app that opens already paired. No copy-paste.
+ */
+export function pwaManifest(opts: { includeStartUrl: boolean }): string {
+  return JSON.stringify({
+    name: "sandgate",
+    short_name: "sandgate",
+    ...(opts.includeStartUrl ? { start_url: "/" } : {}),
+    display: "standalone",
+    background_color: "#141210",
+    theme_color: "#141210",
+    icons: [
+      { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+  });
+}
 
 export const PWA_SW = `
 self.addEventListener("install", function () { self.skipWaiting(); });
@@ -195,6 +205,16 @@ export const PWA_HTML = `<!doctype html>
     color: var(--ink); font: 14px ui-monospace, monospace;
   }
   .setup input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+  .hist { margin-top: 30px; }
+  .hist h3 { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--soft); margin: 0 0 8px; }
+  .hrow { display: flex; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+  .hrow .time { color: var(--soft); font-variant-numeric: tabular-nums; font-size: 12px; min-width: 74px; }
+  .hrow .t { flex: 1; color: #cfc6b2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hrow .d { font-weight: 650; font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase; }
+  .d.approved { color: #7fbf9a; }
+  .d.denied { color: #d98a76; }
+  .d.expired { color: var(--soft); }
 </style>
 </head>
 <body>
@@ -206,7 +226,7 @@ export const PWA_HTML = `<!doctype html>
   </div>
   <div class="pill warn" id="status">starting</div>
 </header>
-<main><div id="banner"></div><div id="list"></div></main>
+<main><div id="banner"></div><div id="list"></div><div id="hist"></div></main>
 <script>
 (function () {
   var PAIR_KEY = "sandgate_pair";
@@ -249,7 +269,13 @@ export const PWA_HTML = `<!doctype html>
   var pair = parsePairing(location.hash);
   if (pair) {
     try { localStorage.setItem(PAIR_KEY, JSON.stringify(pair)); } catch (e) {}
-    history.replaceState(null, "", location.pathname);
+    // iOS Safari (not installed): KEEP the pairing link in the address bar.
+    // With no start_url in the Apple manifest, Add to Home Screen captures
+    // this exact URL — fragment included — so the installed app opens
+    // already paired despite iOS's isolated storage.
+    if (!(isIOS && !standalone)) {
+      history.replaceState(null, "", location.pathname);
+    }
   } else {
     try { pair = JSON.parse(localStorage.getItem(PAIR_KEY)); } catch (e) {}
   }
@@ -291,16 +317,10 @@ export const PWA_HTML = `<!doctype html>
     if (isIOS) {
       b.innerHTML =
         '<h2>Install sandgate to get push notifications</h2>' +
-        '<ol><li>Tap the button below to copy your pairing link</li>' +
-        '<li>Tap Share, then "Add to Home Screen"</li>' +
-        '<li>Open sandgate from your home screen and paste the link</li></ol>' +
-        '<button class="act" id="copyLink">Copy pairing link</button>';
+        '<ol><li>Tap Share (the square with an arrow)</li>' +
+        '<li>Choose "Add to Home Screen"</li>' +
+        '<li>Open sandgate from your home screen — your pairing carries over</li></ol>';
       bannerEl.textContent = ""; bannerEl.appendChild(b);
-      document.getElementById("copyLink").addEventListener("click", function () {
-        navigator.clipboard.writeText(pairLink).then(function () {
-          document.getElementById("copyLink").textContent = "Copied — now: Share → Add to Home Screen";
-        });
-      });
     } else {
       b.innerHTML =
         '<h2>Install sandgate to get push notifications</h2>' +
@@ -401,6 +421,47 @@ export const PWA_HTML = `<!doctype html>
   setInterval(function () { if (!document.hidden) fetchPending(); }, 45000); // safety net
   document.addEventListener("visibilitychange", function () { if (!document.hidden) fetchPending(); });
 
+  // --- local decision history (on-device only; synced history is a paid
+  // --- gateway feature, not the PWA's business) ----------------------------
+  var HIST_KEY = "sandgate_history";
+  var histEl = document.getElementById("hist");
+  function loadHist() {
+    try { return JSON.parse(localStorage.getItem(HIST_KEY)) || []; } catch (e) { return []; }
+  }
+  function recordHist(title, decision) {
+    var entries = loadHist();
+    entries.unshift({ t: title, d: decision, ts: Date.now() });
+    entries = entries.slice(0, 30);
+    try { localStorage.setItem(HIST_KEY, JSON.stringify(entries)); } catch (e) {}
+    renderHist();
+  }
+  function histTime(ts) {
+    var d = new Date(ts), now = new Date();
+    var hm = ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+    if (d.toDateString() === now.toDateString()) return hm;
+    return ("0" + d.getDate()).slice(-2) + "/" + ("0" + (d.getMonth() + 1)).slice(-2) + " " + hm;
+  }
+  function renderHist() {
+    var entries = loadHist();
+    histEl.textContent = "";
+    if (!entries.length) return;
+    var section = document.createElement("div");
+    section.className = "hist";
+    var h = document.createElement("h3");
+    h.textContent = "Recent — this device";
+    section.appendChild(h);
+    entries.forEach(function (entry) {
+      var row = document.createElement("div"); row.className = "hrow";
+      var time = document.createElement("span"); time.className = "time"; time.textContent = histTime(entry.ts);
+      var t = document.createElement("span"); t.className = "t"; t.textContent = entry.t;
+      var d = document.createElement("span"); d.className = "d " + entry.d; d.textContent = entry.d;
+      row.appendChild(time); row.appendChild(t); row.appendChild(d);
+      section.appendChild(row);
+    });
+    histEl.appendChild(section);
+  }
+  renderHist();
+
   // --- approval cards: stable DOM, in-place countdowns ---------------------
   var cards = {}; // requestId -> {el, leftEl, fillEl, barEl, rowEl, req, done}
   var emptyEl = null;
@@ -475,6 +536,7 @@ export const PWA_HTML = `<!doctype html>
         c.rowEl.remove();
         c.leftEl.textContent = "expired — denied";
         c.fillEl.style.width = "0%";
+        recordHist(c.req.title, "expired");
       }
       return;
     }
@@ -504,7 +566,11 @@ export const PWA_HTML = `<!doctype html>
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pairId: pair.pairId, requestId: id, payload: payload }),
       });
-      if (cards[id]) { cards[id].el.remove(); delete cards[id]; }
+      if (cards[id]) {
+        recordHist(cards[id].req.title, cls === "ok" ? "approved" : "denied");
+        cards[id].el.remove();
+        delete cards[id];
+      }
       ensureEmpty(Object.keys(cards).length === 0);
     };
     return b;

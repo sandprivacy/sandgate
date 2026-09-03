@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import webpush from "web-push";
-import { PWA_HTML, PWA_SW, PWA_MANIFEST } from "./pwa-page.js";
+import { PWA_HTML, PWA_SW, pwaManifest } from "./pwa-page.js";
 import { ICON_SVG, iconPng } from "./icons.js";
 
 /**
@@ -128,8 +128,12 @@ export async function startRelay(opts: {
         return res.end(PWA_SW);
       }
       if (req.method === "GET" && url.pathname === "/manifest.webmanifest") {
-        res.writeHead(200, { "Content-Type": "application/manifest+json" });
-        return res.end(PWA_MANIFEST);
+        const isApple = /iPhone|iPad|iPod/.test(req.headers["user-agent"] ?? "");
+        res.writeHead(200, {
+          "Content-Type": "application/manifest+json",
+          Vary: "User-Agent",
+        });
+        return res.end(pwaManifest({ includeStartUrl: !isApple }));
       }
       if (req.method === "GET" && url.pathname === "/icon.svg") {
         res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "max-age=86400" });
