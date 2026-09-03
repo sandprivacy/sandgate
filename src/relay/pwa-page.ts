@@ -41,8 +41,14 @@ export function pwaManifest(opts: { includeStartUrl: boolean }): string {
 export const PWA_SW = `
 self.addEventListener("install", function () { self.skipWaiting(); });
 self.addEventListener("activate", function (e) { e.waitUntil(self.clients.claim()); });
-// A fetch handler is required for Chrome's install prompt; plain passthrough.
-self.addEventListener("fetch", function (e) { e.respondWith(fetch(e.request)); });
+// A fetch handler is required for Chrome's install prompt. Handle ONLY
+// same-origin GETs: on iOS 16.4+, respondWith(fetch(request)) on POSTs
+// (bodies) throws Internal error and silently kills subscribe/decision
+// calls — anything we return from lets the browser handle natively.
+self.addEventListener("fetch", function (e) {
+  if (e.request.method !== "GET") return;
+  e.respondWith(fetch(e.request));
+});
 self.addEventListener("push", function (e) {
   e.waitUntil((async function () {
     await self.registration.showNotification("sandgate", {
@@ -451,11 +457,20 @@ export const PWA_HTML = `<!doctype html>
     return true;
   }
 
+  function showPushError(err) {
+    setStatus("push error", "err");
+    alert(
+      "Notifications could not be enabled: " +
+        (err && err.message ? err.name + " — " + err.message : err) +
+        "\\n\\nOn iPhone this requires iOS 16.4+, the app installed on the home screen, and Lockdown Mode off."
+    );
+  }
+
   function offerPush() {
     if (!("Notification" in window) || !("PushManager" in window)) return;
     if (isIOS && !standalone) return; // impossible in Safari tabs; banner handles install
     if (Notification.permission === "granted") {
-      enablePush().catch(function () {});
+      enablePush().catch(showPushError);
       return;
     }
     if (Notification.permission === "denied") return;
@@ -466,7 +481,7 @@ export const PWA_HTML = `<!doctype html>
       '<button class="act" id="pushBtn">Enable notifications</button>';
     bannerEl.appendChild(b);
     document.getElementById("pushBtn").addEventListener("click", function () {
-      enablePush().catch(function () {});
+      enablePush().catch(showPushError);
     });
   }
   offerPush();
@@ -633,22 +648,28 @@ export const PWA_HTML = `<!doctype html>
       var c = cards[id];
       if (!c || c.done) return;
       b.disabled = true;
-      var payload = await sealPayload(
-        c.pair,
-        { requestId: c.requestId, approved: cls === "ok", ts: Date.now() },
-        "dec:" + c.requestId
-      );
-      await fetch("/api/decision", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pairId: c.pair.pairId, requestId: c.requestId, payload: payload }),
-      });
-      if (cards[id]) {
-        recordHist(histLabel(c), cls === "ok" ? "approved" : "denied");
-        cards[id].el.remove();
-        delete cards[id];
+      try {
+        var payload = await sealPayload(
+          c.pair,
+          { requestId: c.requestId, approved: cls === "ok", ts: Date.now() },
+          "dec:" + c.requestId
+        );
+        var res = await fetch("/api/decision", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pairId: c.pair.pairId, requestId: c.requestId, payload: payload }),
+        });
+        if (!res.ok) throw new Error("relay answered HTTP " + res.status);
+        if (cards[id]) {
+          recordHist(histLabel(c), cls === "ok" ? "approved" : "denied");
+          cards[id].el.remove();
+          delete cards[id];
+        }
+        ensureEmpty(Object.keys(cards).length === 0);
+      } catch (err) {
+        b.disabled = false;
+        alert("Could not send your decision: " + (err && err.message ? err.message : err));
       }
-      ensureEmpty(Object.keys(cards).length === 0);
     };
     return b;
   }
