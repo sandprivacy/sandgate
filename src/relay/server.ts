@@ -130,6 +130,18 @@ export async function startRelay(opts: {
       }
 
       // --- API ---
+      if (req.method === "GET" && url.pathname === "/api/health") {
+        let activeRequests = 0;
+        for (const p of pairings.values()) {
+          for (const e of p.requests.values()) if (e.decision === undefined) activeRequests++;
+        }
+        return json(res, 200, {
+          ok: true,
+          uptime_sec: Math.round(process.uptime()),
+          pairings: Object.keys(state.subscriptions).length,
+          active_requests: activeRequests,
+        });
+      }
       if (req.method === "GET" && url.pathname === "/api/vapid") {
         return json(res, 200, { publicKey: state.vapid.publicKey });
       }
