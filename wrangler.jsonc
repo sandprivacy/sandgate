@@ -1,0 +1,8 @@
+// Cloudflare Workers config: serve the landing page in site/ as static assets.
+{
+  "name": "sandgate",
+  "compatibility_date": "2026-01-01",
+  "assets": {
+    "directory": "./site"
+  }
+}
