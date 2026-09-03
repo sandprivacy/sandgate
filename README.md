@@ -52,6 +52,10 @@ That's it. Your agent now has four new tools.
 - **`create_identity`** — a disposable email inbox so the agent can sign up for services without your real address.
 - **`wait_for_verification`** — long-polls that inbox and returns the extracted verification code and links the moment they arrive.
 
+## Recipes
+
+**CAPTCHAs.** sandgate will never auto-solve a CAPTCHA — that's the point of a CAPTCHA. The pattern that works today, by composition: tell your agent that on hitting one it should call `request_approval("CAPTCHA on <site> — solve it at the computer, then approve to continue")`. Your phone buzzes, you solve it where the browser is, you tap approve, the agent resumes. Same behavior as OpenAI's Operator, plus the notification.
+
 ## Policies
 
 ```bash
@@ -95,8 +99,11 @@ How the trust works: the pairing secret travels once, inside the URL **fragment*
 
 - [x] Generic IMAP backend for verification emails (`sandgate connect-imap`)
 - [x] `sandgate audit` — pretty-print the audit trail
-- [x] Mobile PWA with end-to-end-encrypted push (`sandgate relay` + `sandgate pair`)
-- [ ] Team policies (shared vault, multiple approvers)
+- [x] Mobile PWA with end-to-end-encrypted push (`sandgate relay` + `sandgate pair`), multi-vault, on-device history
+- [x] `ask_human` — free-text answers (SMS codes on your real number, security questions)
+- [ ] OS keychain for the vault passphrase
+- [ ] Slack approval channel with multiple approvers (teams)
+- [ ] Team policies (shared vault, centralized audit)
 - [ ] Framework guides: browser-use, LangGraph, Agno
 
 ## License
