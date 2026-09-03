@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { read } from "read";
 import { getQuota } from "./sandmail.js";
 import { testImapConnection } from "./inbox.js";
-import { resolvePassphrase } from "./passphrase.js";
+import { resolvePassphrase, protectPassphraseDpapi, dpapiDecryptCommand } from "./passphrase.js";
 import { auditPath } from "./paths.js";
 import {
   vaultExists,
@@ -33,6 +33,7 @@ Usage:
   sandgate connect-imap                  Connect your own IMAP mailbox instead (self-hosted)
   sandgate test-approval                 Send a test approval to your phone
   sandgate rekey                         Change the vault passphrase
+  sandgate protect                       Store the passphrase in the OS store (Windows DPAPI)
   sandgate status                        Show what is configured and active
   sandgate audit [n]                     Show the last n audit entries (default 20)
   sandgate serve                         Run the MCP server (stdio)
@@ -271,6 +272,23 @@ async function cmdRekey(): Promise<void> {
   );
 }
 
+async function cmdProtect(): Promise<void> {
+  const prompter = new Prompter();
+  const pass = await prompter.ask("Vault passphrase: ", { hidden: true });
+  prompter.close();
+  if (!pass) {
+    console.error("A passphrase is required.");
+    process.exit(1);
+  }
+  loadVault(pass); // validate before storing — a typo here would be silent later
+  const target = join(sandgateDir(), "pass.dpapi");
+  protectPassphraseDpapi(pass, target);
+  console.log(
+    `Passphrase verified against the vault and stored, DPAPI-encrypted, at:\n  ${target}\n\n` +
+      `Point your MCP config at it with:\n  SANDGATE_PASSPHRASE_CMD = ${dpapiDecryptCommand(target)}`
+  );
+}
+
 async function cmdStatus(): Promise<void> {
   if (!vaultExists()) {
     console.log("No vault. Run `sandgate init` to get started.");
@@ -463,6 +481,8 @@ async function main(): Promise<void> {
       return cmdPair(args[0]);
     case "rekey":
       return cmdRekey();
+    case "protect":
+      return cmdProtect();
     case "status":
       return cmdStatus();
     case "audit":
