@@ -33,6 +33,11 @@ export interface VaultData {
     pass: string;
     baseEmail?: string;
   };
+  pwa?: {
+    relayUrl: string;
+    pairId: string;
+    secret: string;
+  };
 }
 
 const SCRYPT_OPTS = { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };

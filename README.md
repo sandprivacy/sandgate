@@ -72,6 +72,17 @@ sandgate policy mybank.com deny      # never
 3. **Self-hosted.** Runs on your machine; the vault and the audit trail never leave it. The email backend is pluggable: [sandmail](https://sandmail.dev) works out of the box (managed disposable inboxes), or bring your own mailbox with `sandgate connect-imap` — identities become plus-addressed aliases (`you+sg1a2b@domain`) and codes/links are extracted locally.
 4. **Everything audited.** If an agent asked for it, it's in the log.
 
+## The PWA approval channel (E2EE)
+
+Telegram is the quick start; the PWA is the destination. Run your own relay and pair your phone:
+
+```bash
+sandgate relay                    # serves the PWA + forwards sealed blobs (port 8787)
+sandgate pair https://your-relay  # prints a link + QR — open it on your phone
+```
+
+How the trust works: the pairing secret travels once, inside the URL **fragment** (never sent to any server). Both ends derive an AES-256-GCM key (HKDF); every approval request and every tap is sealed with the request id bound into the AAD. The relay stores and forwards blobs it cannot read, and cannot forge — a malicious relay can at worst drop or delay an answer, which is just a deny. Push notifications wake the phone; if push is unavailable the PWA polls while open. A real phone needs the relay behind TLS (service workers require it); `http://localhost:8787` works for a desktop-browser test.
+
 ## Security notes, honestly
 
 - `SANDGATE_PASSPHRASE` in the MCP client config is a deliberate tradeoff: MCP clients launch servers non-interactively, so the passphrase lives in your agent's config file. It protects the vault *at rest* (a stolen `vault.enc` alone is useless); OS keychain integration is on the roadmap.
@@ -83,7 +94,7 @@ sandgate policy mybank.com deny      # never
 
 - [x] Generic IMAP backend for verification emails (`sandgate connect-imap`)
 - [x] `sandgate audit` — pretty-print the audit trail
-- [ ] Dedicated mobile PWA with end-to-end-encrypted web push (replaces the Telegram MVP)
+- [x] Mobile PWA with end-to-end-encrypted push (`sandgate relay` + `sandgate pair`)
 - [ ] Team policies (shared vault, multiple approvers)
 - [ ] Framework guides: browser-use, LangGraph, Agno
 

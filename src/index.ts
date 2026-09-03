@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { stdin, stdout } from "node:process";
 import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { read } from "read";
 import { getQuota } from "./sandmail.js";
 import { testImapConnection } from "./inbox.js";
@@ -24,6 +25,8 @@ Usage:
   sandgate add-totp <domain> <secret>    Store a 2FA seed (base32 or otpauth:// URI)
   sandgate policy <domain> <auto|approve|deny>   Set the 2FA policy for a domain
   sandgate connect-telegram <bot-token>  Connect (or fix) the Telegram approval channel
+  sandgate relay [port]                  Run the approval relay (serves the phone PWA)
+  sandgate pair <relay-url>              Pair your phone via the relay (E2EE, replaces Telegram)
   sandgate connect-sandmail <api-key>    Connect the sandmail inbox backend
   sandgate connect-imap                  Connect your own IMAP mailbox instead (self-hosted)
   sandgate test-approval                 Send a test approval to your phone
@@ -272,17 +275,84 @@ async function cmdAudit(countArg?: string): Promise<void> {
   }
 }
 
+async function cmdRelay(portArg?: string): Promise<void> {
+  const port = portArg ? parseInt(portArg, 10) : 8787;
+  const { startRelay } = await import("./relay/server.js");
+  const relay = await startRelay({
+    port,
+    stateDir: join(sandgateDir(), "relay"),
+  });
+  console.log(
+    `sandgate relay listening on http://localhost:${relay.port}\n` +
+      `Behind TLS (required for phone push), pair with: sandgate pair https://your-relay-host`
+  );
+}
+
+async function cmdPair(relayUrl?: string): Promise<void> {
+  if (!relayUrl) {
+    console.error(
+      "Usage: sandgate pair <relay-url>\n" +
+        "Run `sandgate relay` first (behind TLS for a real phone; http://localhost:8787 works for a desktop browser test)."
+    );
+    process.exit(1);
+  }
+  const prompter = new Prompter();
+  const pass = await getPassphrase(prompter);
+  prompter.close();
+  const data = loadVault(pass);
+
+  const { newPairing } = await import("./pwacrypto.js");
+  const pairing = newPairing();
+  const base = relayUrl.replace(/\/$/, "");
+  const pairLink = `${base}/#p=${pairing.pairId}&s=${pairing.secret}`;
+
+  data.pwa = { relayUrl: base, pairId: pairing.pairId, secret: pairing.secret };
+  saveVault(pass, data);
+
+  const qrcode = (await import("qrcode-terminal")).default;
+  console.log("\nOpen this link on your phone (the secret is in the URL fragment — it never reaches the relay):\n");
+  console.log(`  ${pairLink}\n`);
+  qrcode.generate(pairLink, { small: true });
+  console.log("\nWaiting for the phone to subscribe (2 min)…");
+
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(
+        `${base}/api/pair-status?pairId=${encodeURIComponent(pairing.pairId)}`
+      );
+      const status = (await res.json()) as { subscribed: boolean };
+      if (status.subscribed) {
+        console.log("Paired! The PWA now takes over approvals (Telegram becomes the fallback). Try: sandgate test-approval");
+        return;
+      }
+    } catch {
+      // relay not reachable yet; keep trying
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  console.log(
+    "No subscription yet — the pairing is saved anyway. Open the link on the phone, then check with: sandgate test-approval"
+  );
+}
+
 async function cmdTestApproval(): Promise<void> {
   const prompter = new Prompter();
   const pass = await getPassphrase(prompter);
   prompter.close();
   const data = loadVault(pass);
-  if (!data.telegram) {
-    console.error("Telegram is not configured. Run `sandgate connect-telegram <bot-token>`.");
+  let approver;
+  if (data.pwa) {
+    const { PwaApprover } = await import("./pwa-approver.js");
+    approver = new PwaApprover(data.pwa);
+    console.log("Sending test approval to the paired PWA (60s timeout)…");
+  } else if (data.telegram) {
+    approver = new TelegramApprover(data.telegram.botToken, data.telegram.chatId);
+    console.log("Sending test approval to Telegram (60s timeout)…");
+  } else {
+    console.error("No approval channel. Run `sandgate connect-telegram <bot-token>` or `sandgate pair <relay-url>`.");
     process.exit(1);
   }
-  console.log("Sending test approval to your phone (60s timeout)…");
-  const approver = new TelegramApprover(data.telegram.botToken, data.telegram.chatId);
   const result = await approver.request({
     title: "Test from sandgate",
     body: "Tap Approve to confirm your approval channel works.",
@@ -308,6 +378,10 @@ async function main(): Promise<void> {
       return cmdConnectImap();
     case "test-approval":
       return cmdTestApproval();
+    case "relay":
+      return cmdRelay(args[0]);
+    case "pair":
+      return cmdPair(args[0]);
     case "audit":
       return cmdAudit(args[0]);
     case undefined:

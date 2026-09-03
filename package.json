@@ -37,12 +37,16 @@
     "imapflow": "^1.7.8",
     "mailparser": "^3.9.20",
     "otpauth": "^9.5.1",
+    "qrcode-terminal": "^0.12.0",
     "read": "^5.0.1",
+    "web-push": "^3.6.7",
     "zod": "^4.5.4"
   },
   "devDependencies": {
     "@types/mailparser": "^3.4.6",
     "@types/node": "^26.4.1",
+    "@types/qrcode-terminal": "^0.12.2",
+    "@types/web-push": "^3.6.4",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   }

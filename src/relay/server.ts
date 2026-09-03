@@ -1,0 +1,218 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import webpush from "web-push";
+import { PWA_HTML, PWA_SW, PWA_MANIFEST } from "./pwa-page.js";
+
+/**
+ * The sandgate relay: bridges a gateway (on a computer) and the paired
+ * phone's PWA. It stores push subscriptions and forwards *sealed* blobs in
+ * both directions — it holds no key and can read nothing. Self-host it
+ * (`sandgate relay`) behind TLS, or use a hosted one. State (VAPID keys,
+ * subscriptions) persists to a small JSON file; queues are in-memory.
+ */
+
+interface RelayRequestEntry {
+  requestId: string;
+  payload: unknown;
+  ts: number;
+  decision?: unknown;
+  waiters: ((decision: unknown) => void)[];
+}
+
+interface Pairing {
+  subscription?: webpush.PushSubscription;
+  requests: Map<string, RelayRequestEntry>;
+}
+
+const MAX_BODY = 64 * 1024;
+const REQUEST_TTL_MS = 30 * 60 * 1000;
+
+export async function startRelay(opts: {
+  port: number;
+  stateDir: string;
+}): Promise<{ close: () => void; port: number }> {
+  mkdirSync(opts.stateDir, { recursive: true });
+  const statePath = join(opts.stateDir, "relay-state.json");
+
+  let state: {
+    vapid: { publicKey: string; privateKey: string };
+    subscriptions: Record<string, webpush.PushSubscription>;
+  };
+  if (existsSync(statePath)) {
+    state = JSON.parse(readFileSync(statePath, "utf8"));
+  } else {
+    const keys = webpush.generateVAPIDKeys();
+    state = { vapid: keys, subscriptions: {} };
+    writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 });
+  }
+  const persist = () => writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 });
+  webpush.setVapidDetails("mailto:relay@sandgate.local", state.vapid.publicKey, state.vapid.privateKey);
+
+  const pairings = new Map<string, Pairing>();
+  const getPairing = (pairId: string): Pairing => {
+    let p = pairings.get(pairId);
+    if (!p) {
+      p = { subscription: state.subscriptions[pairId], requests: new Map() };
+      pairings.set(pairId, p);
+    }
+    return p;
+  };
+
+  const gc = setInterval(() => {
+    const cutoff = Date.now() - REQUEST_TTL_MS;
+    for (const p of pairings.values()) {
+      for (const [id, entry] of p.requests) {
+        if (entry.ts < cutoff) p.requests.delete(id);
+      }
+    }
+  }, 60_000);
+  gc.unref();
+
+  function json(res: ServerResponse, status: number, body: unknown): void {
+    const data = JSON.stringify(body);
+    res.writeHead(status, { "Content-Type": "application/json" });
+    res.end(data);
+  }
+
+  function readBody(req: IncomingMessage): Promise<any> {
+    return new Promise((resolve, reject) => {
+      let size = 0;
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => {
+        size += c.length;
+        if (size > MAX_BODY) {
+          reject(new Error("body too large"));
+          req.destroy();
+          return;
+        }
+        chunks.push(c);
+      });
+      req.on("end", () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        } catch {
+          reject(new Error("invalid JSON"));
+        }
+      });
+      req.on("error", reject);
+    });
+  }
+
+  const validId = (s: unknown): s is string =>
+    typeof s === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(s);
+
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    try {
+      // --- static PWA ---
+      if (req.method === "GET" && url.pathname === "/") {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        return res.end(PWA_HTML);
+      }
+      if (req.method === "GET" && url.pathname === "/sw.js") {
+        res.writeHead(200, { "Content-Type": "application/javascript" });
+        return res.end(PWA_SW);
+      }
+      if (req.method === "GET" && url.pathname === "/manifest.webmanifest") {
+        res.writeHead(200, { "Content-Type": "application/manifest+json" });
+        return res.end(PWA_MANIFEST);
+      }
+
+      // --- API ---
+      if (req.method === "GET" && url.pathname === "/api/vapid") {
+        return json(res, 200, { publicKey: state.vapid.publicKey });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/subscribe") {
+        const body = await readBody(req);
+        if (!validId(body.pairId) || !body.subscription?.endpoint) {
+          return json(res, 400, { error: "pairId and subscription required" });
+        }
+        getPairing(body.pairId).subscription = body.subscription;
+        state.subscriptions[body.pairId] = body.subscription;
+        persist();
+        return json(res, 200, { ok: true });
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/pair-status") {
+        const pairId = url.searchParams.get("pairId") ?? "";
+        if (!validId(pairId)) return json(res, 400, { error: "bad pairId" });
+        return json(res, 200, { subscribed: !!getPairing(pairId).subscription });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/request") {
+        const body = await readBody(req);
+        if (!validId(body.pairId) || !validId(body.requestId) || !body.payload) {
+          return json(res, 400, { error: "pairId, requestId, payload required" });
+        }
+        const pairing = getPairing(body.pairId);
+        pairing.requests.set(body.requestId, {
+          requestId: body.requestId,
+          payload: body.payload,
+          ts: Date.now(),
+          waiters: [],
+        });
+        if (pairing.subscription) {
+          webpush
+            .sendNotification(pairing.subscription, JSON.stringify({ type: "approval" }))
+            .catch(() => {}); // phone offline / stale sub — PWA polls anyway
+        }
+        return json(res, 200, { ok: true });
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/pending") {
+        const pairId = url.searchParams.get("pairId") ?? "";
+        if (!validId(pairId)) return json(res, 400, { error: "bad pairId" });
+        const items = [...getPairing(pairId).requests.values()]
+          .filter((e) => e.decision === undefined)
+          .map((e) => ({ requestId: e.requestId, payload: e.payload, ts: e.ts }));
+        return json(res, 200, items);
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/decision") {
+        const body = await readBody(req);
+        if (!validId(body.pairId) || !validId(body.requestId) || !body.payload) {
+          return json(res, 400, { error: "pairId, requestId, payload required" });
+        }
+        const entry = getPairing(body.pairId).requests.get(body.requestId);
+        if (!entry) return json(res, 404, { error: "unknown request" });
+        if (entry.decision !== undefined) return json(res, 200, { ok: true }); // first tap wins
+        entry.decision = body.payload;
+        for (const waiter of entry.waiters.splice(0)) waiter(body.payload);
+        return json(res, 200, { ok: true });
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/decision") {
+        const pairId = url.searchParams.get("pairId") ?? "";
+        const requestId = url.searchParams.get("requestId") ?? "";
+        const timeoutSec = Math.min(30, parseInt(url.searchParams.get("timeoutSec") ?? "25", 10) || 25);
+        if (!validId(pairId) || !validId(requestId)) return json(res, 400, { error: "bad ids" });
+        const entry = getPairing(pairId).requests.get(requestId);
+        if (!entry) return json(res, 404, { error: "unknown request" });
+        if (entry.decision !== undefined) return json(res, 200, { payload: entry.decision });
+        const timer = setTimeout(() => {
+          const idx = entry.waiters.indexOf(waiter);
+          if (idx >= 0) entry.waiters.splice(idx, 1);
+          res.writeHead(204);
+          res.end();
+        }, timeoutSec * 1000);
+        const waiter = (decision: unknown) => {
+          clearTimeout(timer);
+          json(res, 200, { payload: decision });
+        };
+        entry.waiters.push(waiter);
+        return;
+      }
+
+      json(res, 404, { error: "not found" });
+    } catch (err) {
+      json(res, 400, { error: err instanceof Error ? err.message : "bad request" });
+    }
+  });
+
+  await new Promise<void>((resolve) => server.listen(opts.port, resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : opts.port;
+  return { close: () => server.close(), port };
+}
