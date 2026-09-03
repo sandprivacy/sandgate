@@ -1,9 +1,12 @@
+import { GLYPH_SVG_RECTS } from "./icons.js";
+
 /**
  * The phone-side PWA, shipped as strings so the npm package stays
  * self-contained. The inline JS mirrors src/pwacrypto.ts byte-for-byte:
  * HKDF-SHA256(salt "sandgate-pwa-v1", info "approval-channel") -> AES-256-GCM,
  * AAD "req:<id>" / "dec:<id>". The pairing secret arrives once in the URL
  * fragment (never sent to the relay) and lives in localStorage.
+ * No emoji anywhere: the identity is the geometric gate mark from icons.ts.
  */
 
 export const PWA_MANIFEST = JSON.stringify({
@@ -13,6 +16,10 @@ export const PWA_MANIFEST = JSON.stringify({
   display: "standalone",
   background_color: "#141210",
   theme_color: "#141210",
+  icons: [
+    { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+    { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+  ],
 });
 
 export const PWA_SW = `
@@ -21,9 +28,11 @@ self.addEventListener("activate", function (e) { e.waitUntil(self.clients.claim(
 self.addEventListener("push", function (e) {
   e.waitUntil((async function () {
     await self.registration.showNotification("sandgate", {
-      body: "🚪 Approval requested — tap to answer",
+      body: "Approval requested — tap to answer",
       tag: "sandgate-approval",
       renotify: true,
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
     });
     var clientList = await self.clients.matchAll({ type: "window" });
     clientList.forEach(function (c) { c.postMessage("refresh"); });
@@ -39,6 +48,14 @@ self.addEventListener("notificationclick", function (e) {
 });
 `;
 
+const GATE_GLYPH = (size: number, className: string) =>
+  `<svg class="${className}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">${GLYPH_SVG_RECTS}</svg>`;
+
+const CHECK_ICON =
+  '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.5l5 5L19.5 6.5"/></svg>';
+const CROSS_ICON =
+  '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>';
+
 export const PWA_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -48,6 +65,8 @@ export const PWA_HTML = `<!doctype html>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#141210">
 <link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon-180.png">
 <title>sandgate</title>
 <style>
   :root {
@@ -82,19 +101,22 @@ export const PWA_HTML = `<!doctype html>
   }
   .logo {
     width: 38px; height: 38px; border-radius: 10px;
-    background: linear-gradient(145deg, #2c2517, #1c1811);
-    border: 1px solid #4a3d1f;
-    display: grid; place-items: center; font-size: 20px;
-    box-shadow: inset 0 1px 0 rgba(217,164,65,.15);
+    background: linear-gradient(145deg, #241f14, #1a1610);
+    border: 1px solid #453a1e;
+    display: grid; place-items: center;
+    color: var(--accent);
+    box-shadow: inset 0 1px 0 rgba(217,164,65,.12);
   }
   .title { flex: 1; }
   .title h1 { font-size: 17px; margin: 0; letter-spacing: .01em; }
   .title .sub { font-size: 11.5px; color: var(--soft); letter-spacing: .06em; text-transform: uppercase; }
   .pill {
+    display: flex; align-items: center; gap: 6px;
     font-size: 11px; font-weight: 600; letter-spacing: .04em;
     padding: 5px 10px; border-radius: 999px; white-space: nowrap;
     background: #26311f; color: #9dc98a; border: 1px solid #3b4a30;
   }
+  .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .pill.warn { background: #332a17; color: var(--accent); border-color: #4a3d1f; }
   .pill.err  { background: #331d17; color: #d98a76; border-color: #4a2a1f; }
 
@@ -114,13 +136,14 @@ export const PWA_HTML = `<!doctype html>
   .card h2 { font-size: 18px; line-height: 1.3; margin: 0 0 6px; }
   .card p { margin: 0 0 12px; color: #cfc6b2; font-size: 14.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .timer { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
-  .timer .left { font-size: 12px; color: var(--soft); min-width: 86px; font-variant-numeric: tabular-nums; }
+  .timer .left { font-size: 12px; color: var(--soft); min-width: 96px; font-variant-numeric: tabular-nums; }
   .bar { flex: 1; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
   .bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; transition: width 1s linear; }
   .bar.low i { background: var(--no); }
   .row { display: flex; gap: 10px; }
   button {
-    flex: 1; padding: 13px; font-size: 16px; font-weight: 650;
+    flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 13px; font-size: 15.5px; font-weight: 650;
     border: 0; border-radius: 10px; cursor: pointer; color: #fff;
     font-family: inherit; letter-spacing: .01em;
     transition: transform .06s ease;
@@ -133,11 +156,12 @@ export const PWA_HTML = `<!doctype html>
   .expired h2 { text-decoration: line-through; text-decoration-thickness: 1px; }
 
   .empty { text-align: center; padding: 72px 20px; color: var(--soft); }
-  .empty .glyph { font-size: 44px; margin-bottom: 14px; filter: saturate(.8); }
+  .empty .mark { color: var(--accent); opacity: .3; margin-bottom: 16px; }
   .empty .big { font-size: 16px; color: #cfc6b2; margin-bottom: 4px; }
   .empty .hint { font-size: 13px; }
 
   .setup { text-align: center; padding: 60px 24px; color: #cfc6b2; }
+  .setup .mark { color: var(--accent); opacity: .5; margin-bottom: 16px; }
   .setup code {
     display: inline-block; margin-top: 10px; padding: 8px 14px; border-radius: 8px;
     background: var(--panel-raised); border: 1px solid var(--line);
@@ -147,17 +171,20 @@ export const PWA_HTML = `<!doctype html>
 </head>
 <body>
 <header>
-  <div class="logo">🚪</div>
+  <div class="logo">${GATE_GLYPH(22, "mark")}</div>
   <div class="title">
     <h1>sandgate</h1>
     <div class="sub">your agents ask. you decide.</div>
   </div>
-  <div class="pill warn" id="status">starting…</div>
+  <div class="pill warn" id="status">starting</div>
 </header>
 <main><div id="list"></div></main>
 <script>
 (function () {
   var PAIR_KEY = "sandgate_pair";
+  var GLYPH = '${GATE_GLYPH(56, "mark").replace(/'/g, "\\'")}';
+  var CHECK = '${CHECK_ICON.replace(/'/g, "\\'")}';
+  var CROSS = '${CROSS_ICON.replace(/'/g, "\\'")}';
 
   function b64uToBytes(s) {
     s = s.replace(/-/g, "+").replace(/_/g, "/");
@@ -191,7 +218,7 @@ export const PWA_HTML = `<!doctype html>
   }
   if (!pair) {
     setStatus("not paired", "err");
-    listEl.innerHTML = '<div class="setup">Not paired yet.<br>On your computer, run<br><code>sandgate pair</code><br><br>then open the link it prints on this device.</div>';
+    listEl.innerHTML = '<div class="setup"><div class="mark">' + GLYPH + '</div>Not paired yet.<br>On your computer, run<br><code>sandgate pair</code><br><br>then open the link it prints on this device.</div>';
     return;
   }
 
@@ -248,7 +275,7 @@ export const PWA_HTML = `<!doctype html>
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ pairId: pair.pairId, subscription: sub }),
             });
-            setStatus("● push on");
+            setStatus("push on");
             return;
           }
         }
@@ -287,7 +314,7 @@ export const PWA_HTML = `<!doctype html>
     if (!active.length) {
       var empty = document.createElement("div");
       empty.className = "empty";
-      empty.innerHTML = '<div class="glyph">🏜️</div><div class="big">All quiet.</div><div class="hint">When an agent needs you, it shows up here.</div>';
+      empty.innerHTML = '<div class="mark">' + GLYPH + '</div><div class="big">All quiet.</div><div class="hint">When an agent needs you, it shows up here.</div>';
       listEl.appendChild(empty);
       return;
     }
@@ -315,17 +342,19 @@ export const PWA_HTML = `<!doctype html>
 
       if (remaining > 0) {
         var row = document.createElement("div"); row.className = "row";
-        row.appendChild(makeBtn("Approve", "ok", item));
-        row.appendChild(makeBtn("Deny", "no", item));
+        row.appendChild(makeBtn("Approve", "ok", CHECK, item));
+        row.appendChild(makeBtn("Deny", "no", CROSS, item));
         card.appendChild(row);
       }
       listEl.appendChild(card);
     });
   }
 
-  function makeBtn(label, cls, item) {
+  function makeBtn(label, cls, icon, item) {
     var b = document.createElement("button");
-    b.className = cls; b.textContent = label;
+    b.className = cls;
+    b.innerHTML = icon + "<span></span>";
+    b.querySelector("span").textContent = label;
     b.onclick = async function () {
       b.disabled = true;
       var payload = await sealPayload(

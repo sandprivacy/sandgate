@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import webpush from "web-push";
 import { PWA_HTML, PWA_SW, PWA_MANIFEST } from "./pwa-page.js";
+import { ICON_SVG, iconPng } from "./icons.js";
 
 /**
  * The sandgate relay: bridges a gateway (on a computer) and the paired
@@ -117,6 +118,15 @@ export async function startRelay(opts: {
       if (req.method === "GET" && url.pathname === "/manifest.webmanifest") {
         res.writeHead(200, { "Content-Type": "application/manifest+json" });
         return res.end(PWA_MANIFEST);
+      }
+      if (req.method === "GET" && url.pathname === "/icon.svg") {
+        res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "max-age=86400" });
+        return res.end(ICON_SVG);
+      }
+      const iconMatch = url.pathname.match(/^\/icon-(180|192|512)\.png$/);
+      if (req.method === "GET" && iconMatch) {
+        res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "max-age=86400" });
+        return res.end(iconPng(parseInt(iconMatch[1]!, 10)));
       }
 
       // --- API ---

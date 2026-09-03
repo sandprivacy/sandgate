@@ -30,6 +30,7 @@ Usage:
   sandgate connect-sandmail <api-key>    Connect the sandmail inbox backend
   sandgate connect-imap                  Connect your own IMAP mailbox instead (self-hosted)
   sandgate test-approval                 Send a test approval to your phone
+  sandgate status                        Show what is configured and active
   sandgate audit [n]                     Show the last n audit entries (default 20)
   sandgate serve                         Run the MCP server (stdio)
 
@@ -247,6 +248,50 @@ async function cmdConnectImap(): Promise<void> {
   console.log(`IMAP connected (${config.user}@${config.host}).${note}`);
 }
 
+async function cmdStatus(): Promise<void> {
+  if (!vaultExists()) {
+    console.log("No vault. Run `sandgate init` to get started.");
+    return;
+  }
+  const prompter = new Prompter();
+  const pass = await getPassphrase(prompter);
+  prompter.close();
+  const data = loadVault(pass);
+  const config = loadConfig();
+  const domains = Object.keys(data.totp);
+  const auditCount = existsSync(auditPath())
+    ? readFileSync(auditPath(), "utf8").trim().split("\n").filter(Boolean).length
+    : 0;
+
+  const approval = data.pwa
+    ? `PWA via ${data.pwa.relayUrl} (Telegram ${data.telegram ? "fallback" : "not set"})`
+    : data.telegram
+      ? "Telegram"
+      : "none — run `sandgate pair <relay-url>` or `sandgate connect-telegram <token>`";
+  const inboxLine = data.sandmail
+    ? "sandmail" + (data.imap ? " (imap configured but sandmail takes precedence)" : "")
+    : data.imap
+      ? `imap (${data.imap.user}@${data.imap.host})`
+      : "none — run `sandgate connect-sandmail <key>` or `sandgate connect-imap`";
+
+  console.log(`sandgate status — ${sandgateDir()}\n`);
+  console.log(`  approval channel   ${approval}`);
+  console.log(`  inbox backend      ${inboxLine}`);
+  console.log(
+    `  2FA seeds          ${domains.length ? domains.join(", ") : "none — add with \`sandgate add-totp <domain> <secret>\`"}`
+  );
+  console.log(
+    `  2FA policy         default ${config.policies.totpDefault}` +
+      (Object.keys(config.policies.totp).length
+        ? "; " +
+          Object.entries(config.policies.totp)
+            .map(([d, p]) => `${d}=${p}`)
+            .join(", ")
+        : "")
+  );
+  console.log(`  audit entries      ${auditCount}`);
+}
+
 async function cmdAudit(countArg?: string): Promise<void> {
   const count = Math.max(1, parseInt(countArg ?? "20", 10) || 20);
   if (!existsSync(auditPath())) {
@@ -255,11 +300,11 @@ async function cmdAudit(countArg?: string): Promise<void> {
   }
   const lines = readFileSync(auditPath(), "utf8").trim().split("\n").slice(-count);
   const icons: Record<string, string> = {
-    auto: "🟢",
-    approved: "✅",
-    denied: "❌",
-    timeout: "⏱",
-    error: "⚠",
+    auto: "·",
+    approved: "✓",
+    denied: "✗",
+    timeout: "…",
+    error: "!",
   };
   for (const line of lines) {
     try {
@@ -382,6 +427,8 @@ async function main(): Promise<void> {
       return cmdRelay(args[0]);
     case "pair":
       return cmdPair(args[0]);
+    case "status":
+      return cmdStatus();
     case "audit":
       return cmdAudit(args[0]);
     case undefined:

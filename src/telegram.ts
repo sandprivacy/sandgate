@@ -63,7 +63,7 @@ export class TelegramApprover implements Approver {
   async request(req: ApprovalRequest): Promise<ApprovalResult> {
     const nonce = randomBytes(8).toString("hex");
     const text =
-      `🚪 *sandgate — approval requested*\n\n` +
+      `*sandgate — approval requested*\n\n` +
       `*${escapeMd(req.title.slice(0, MAX_FIELD))}*` +
       (req.body ? `\n\n${escapeMd(req.body.slice(0, MAX_FIELD))}` : "") +
       `\n\n_No answer in ${req.timeoutSec}s = denied._`;
