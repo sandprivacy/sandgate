@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { read } from "read";
 import { getQuota } from "./sandmail.js";
 import { testImapConnection } from "./inbox.js";
+import { resolvePassphrase } from "./passphrase.js";
 import { auditPath } from "./paths.js";
 import {
   vaultExists,
@@ -444,11 +445,21 @@ async function main(): Promise<void> {
       return cmdAudit(args[0]);
     case undefined:
     case "serve": {
-      const pass = process.env.SANDGATE_PASSPHRASE;
+      let pass: string | undefined;
+      try {
+        pass = resolvePassphrase(process.env);
+      } catch (err) {
+        console.error(
+          `SANDGATE_PASSPHRASE_CMD failed: ${err instanceof Error ? err.message : err}`
+        );
+        process.exit(1);
+      }
       if (!pass) {
         console.error(
-          "SANDGATE_PASSPHRASE is not set. MCP clients launch sandgate non-interactively;\n" +
-            'add it to the server config, e.g. {"env": {"SANDGATE_PASSPHRASE": "..."}}'
+          "No vault passphrase. MCP clients launch sandgate non-interactively; provide either\n" +
+            '  SANDGATE_PASSPHRASE      the value itself, or\n' +
+            "  SANDGATE_PASSPHRASE_CMD  a command printing it (OS keychain, DPAPI, password manager CLI)\n" +
+            "in the MCP server config env."
         );
         process.exit(1);
       }

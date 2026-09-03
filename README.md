@@ -90,7 +90,7 @@ How the trust works: the pairing secret travels once, inside the URL **fragment*
 
 ## Security notes, honestly
 
-- `SANDGATE_PASSPHRASE` in the MCP client config is a deliberate tradeoff: MCP clients launch servers non-interactively, so the passphrase lives in your agent's config file. It protects the vault *at rest* (a stolen `vault.enc` alone is useless); OS keychain integration is on the roadmap.
+- MCP clients launch servers non-interactively, so the vault passphrase must come from the environment. `SANDGATE_PASSPHRASE` (the value, cleartext in your config) protects the vault *at rest* — a stolen `vault.enc` alone is useless. For more, `SANDGATE_PASSPHRASE_CMD` runs a command whose stdout is the passphrase, so it can live in your OS secret store: Windows DPAPI (`ConvertFrom-SecureString` once, decrypt in the command), macOS `security find-generic-password`, Linux `secret-tool lookup`, or any password manager CLI. Either way, a fully compromised machine defeats any local secret store — that threat class is out of scope for all of them.
 - Approval taps are only accepted from your own Telegram chat; anything else — including silence — is a deny. Agent-supplied text in approval messages is escaped and truncated.
 - Email content handled by `wait_for_verification` is untrusted third-party input. The tool description tells agents so; only the extracted code and hint-filtered links are returned, never the raw body.
 - Several agents can wait on you at once: approvals are served by a single dispatcher, first tap wins per request.

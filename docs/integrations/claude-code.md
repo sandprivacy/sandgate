@@ -27,6 +27,13 @@ the trail.
 
 - The passphrase lives in the MCP server config, not in the model's
   context. Rotate it by re-running `claude mcp add` with the new value.
+- Prefer not to keep it cleartext? Use `SANDGATE_PASSPHRASE_CMD` — a
+  command whose stdout is the passphrase. Windows (DPAPI, once):
+  `Read-Host -AsSecureString | ConvertFrom-SecureString | Out-File $env:USERPROFILE\.sandgate\pass.dpapi`
+  then set the env to:
+  `powershell -NoProfile -Command "[Net.NetworkCredential]::new('', (Get-Content $env:USERPROFILE\.sandgate\pass.dpapi | ConvertTo-SecureString)).Password"`
+  macOS: `security find-generic-password -s sandgate -w`. Linux:
+  `secret-tool lookup service sandgate`.
 - Per-domain 2FA policy: `sandgate policy github.com auto` for trusted
   sites (no tap), `deny` to hard-block.
 - A useful line for your `CLAUDE.md`: "Before any purchase, deletion, or
