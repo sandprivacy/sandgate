@@ -74,6 +74,11 @@ the challenge and the user-verification flag. Anything off — a replayed
 assertion, another device, a missing biometric — is a denial, never an
 approval. Off by default; `sandgate status` tells you where you stand.
 
+Turning it back off (`sandgate biometric off`) asks for the vault
+passphrase: the switch lives inside the encrypted vault, so editing a
+config file — or running the command without the passphrase — cannot
+weaken your setup.
+
 ## Policies
 
 ```bash

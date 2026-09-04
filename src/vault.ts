@@ -41,6 +41,12 @@ export interface VaultData {
   };
   /** Platform authenticator enrolled on the paired phone (Face ID / Touch ID). */
   biometric?: BiometricCredential;
+  /**
+   * Whether approvals must carry a verified biometric assertion. Lives
+   * here, not in config.json: disabling a protection must cost the
+   * passphrase, and AES-GCM makes the flag tamper-evident.
+   */
+  requireBiometric?: boolean;
 }
 
 const SCRYPT_OPTS = { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };

@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { configPath } from "./paths.js";
+import type { VaultData } from "./vault.js";
 
 /**
  * Non-secret preferences and per-domain policies. Lives in plaintext
@@ -22,9 +23,9 @@ export interface Config {
   };
   approvalTimeoutSec: number;
   /**
-   * Require a verified biometric assertion (Face ID / Touch ID on the
-   * paired phone) before any approval counts. Off by default: it needs
-   * an enrolled credential, and a tap is enough for most people.
+   * @deprecated moved into the vault (see VaultData.requireBiometric) so
+   * that disabling it costs the passphrase. Still read for setups created
+   * before 0.3.2; `sandgate biometric on|off` migrates it.
    */
   requireBiometric: boolean;
 }
@@ -56,4 +57,12 @@ export function saveConfig(config: Config): void {
 
 export function totpPolicy(config: Config, domain: string): Policy {
   return config.policies.totp[domain] ?? config.policies.totpDefault;
+}
+
+/**
+ * Is a verified biometric required? The vault wins; the plaintext config
+ * flag is only a fallback for vaults written before 0.3.2.
+ */
+export function biometricRequired(vault: VaultData, config: Config): boolean {
+  return vault.requireBiometric ?? config.requireBiometric ?? false;
 }

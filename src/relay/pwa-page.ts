@@ -640,7 +640,26 @@ export const PWA_HTML = `<!doctype html>
     }
   }
 
+  // Push, SSE and the safety poll all trigger refreshes, and they arrive
+  // together. Two of them used to race in the gap between "do I have this
+  // card?" and adding it — decrypting is async — so one request could
+  // render several times, and only the last copy stayed wired. One refresh
+  // runs at a time now; overlapping triggers coalesce into one re-run.
+  var refreshing = false;
+  var refreshQueued = false;
+
   async function fetchPending() {
+    if (refreshing) { refreshQueued = true; return; }
+    refreshing = true;
+    try {
+      await refreshOnce();
+    } finally {
+      refreshing = false;
+      if (refreshQueued) { refreshQueued = false; fetchPending(); }
+    }
+  }
+
+  async function refreshOnce() {
     var seen = {};
     await Promise.all(pairs.map(async function (p) {
       var raw;
@@ -651,16 +670,27 @@ export const PWA_HTML = `<!doctype html>
         var key = p.pairId + ":" + raw[i].requestId;
         seen[key] = true;
         if (cards[key]) continue;
+        // Claim the key before awaiting: two vaults resolving at once must
+        // not both decide the card is missing.
+        cards[key] = null;
         try {
           var req = await openSealed(p, raw[i].payload, "req:" + raw[i].requestId);
           addCard(key, p, raw[i].requestId, req);
-        } catch (e) { /* not ours / tampered */ }
+        } catch (e) {
+          delete cards[key]; // not ours / tampered — release the claim
+        }
       }
     }));
     for (var cid in cards) {
-      if (!seen[cid]) { cards[cid].el.remove(); delete cards[cid]; }
+      if (!seen[cid] && cards[cid]) { cards[cid].el.remove(); delete cards[cid]; }
     }
-    ensureEmpty(Object.keys(cards).length === 0);
+    ensureEmpty(activeCount() === 0);
+  }
+
+  function activeCount() {
+    var n = 0;
+    for (var k in cards) if (cards[k]) n++;
+    return n;
   }
 
   function addCard(id, p, requestId, req) {
@@ -774,7 +804,7 @@ export const PWA_HTML = `<!doctype html>
     c.barEl.className = "bar" + (remaining < total * 0.25 ? " low" : "");
   }
   setInterval(function () {
-    for (var id in cards) tickOne(cards[id]);
+    for (var id in cards) if (cards[id]) tickOne(cards[id]);
   }, 1000);
 
   function makeActionBtn(label, cls, icon, onTap) {
@@ -803,7 +833,7 @@ export const PWA_HTML = `<!doctype html>
         cards[id].el.remove();
         delete cards[id];
       }
-      ensureEmpty(Object.keys(cards).length === 0);
+      ensureEmpty(activeCount() === 0);
     } catch (err) {
       btn.disabled = false;
       alert("Could not send your decision: " + (err && err.message ? err.message : err));

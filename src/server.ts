@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { loadVault, type VaultData } from "./vault.js";
-import { loadConfig, totpPolicy, type Config } from "./config.js";
+import { loadConfig, totpPolicy, biometricRequired, type Config } from "./config.js";
 import { generateCode } from "./totp.js";
 import { TelegramApprover, type Approver } from "./telegram.js";
 import { pwaApproverFrom } from "./pwa-approver.js";
@@ -28,7 +28,7 @@ export async function serve(passphrase: string): Promise<void> {
   const vault: VaultData = loadVault(passphrase);
   const config: Config = loadConfig();
 
-  if (config.requireBiometric && !vault.biometric) {
+  if (biometricRequired(vault, config) && !vault.biometric) {
     // Fail closed rather than silently downgrade to a plain tap.
     throw new Error(
       "requireBiometric is on but no credential is enrolled. Run `sandgate enroll-biometric`, or turn it off with `sandgate biometric off`."

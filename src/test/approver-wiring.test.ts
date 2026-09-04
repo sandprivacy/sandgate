@@ -126,3 +126,22 @@ test("enforcement without an enrolled credential refuses instead of downgrading"
     assert.match(String(outcome.error), /no credential is enrolled/);
   });
 });
+
+test("the vault flag wins over the legacy plaintext config flag", async () => {
+  const { biometricRequired } = await import("../config.js");
+  const base: VaultData = { totp: {} };
+
+  // Vaults written before 0.3.2 kept the switch in config.json.
+  assert.equal(biometricRequired(base, { ...DEFAULT_CONFIG, requireBiometric: true }), true);
+  // Once the vault carries it, the plaintext file cannot re-enable...
+  assert.equal(
+    biometricRequired({ ...base, requireBiometric: false }, { ...DEFAULT_CONFIG, requireBiometric: true }),
+    false
+  );
+  // ...nor disable it: only the passphrase-protected vault decides.
+  assert.equal(
+    biometricRequired({ ...base, requireBiometric: true }, { ...DEFAULT_CONFIG, requireBiometric: false }),
+    true
+  );
+  assert.equal(biometricRequired(base, DEFAULT_CONFIG), false);
+});

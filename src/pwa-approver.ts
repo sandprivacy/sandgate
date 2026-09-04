@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { Approver, ApprovalRequest, ApprovalResult, AskResult } from "./telegram.js";
 import type { VaultData } from "./vault.js";
-import type { Config } from "./config.js";
+import { biometricRequired, type Config } from "./config.js";
 import { deriveKey, seal, open, aadForRequest, aadForDecision } from "./pwacrypto.js";
 import {
   verifyAssertion,
@@ -161,6 +161,6 @@ export function pwaApproverFrom(vault: VaultData, config: Config): PwaApprover |
   return new PwaApprover({
     ...vault.pwa,
     biometric: vault.biometric,
-    requireBiometric: config.requireBiometric,
+    requireBiometric: biometricRequired(vault, config),
   });
 }

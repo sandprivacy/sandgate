@@ -14,7 +14,7 @@ import {
   rekeyVault,
   type VaultData,
 } from "./vault.js";
-import { loadConfig, saveConfig, type Policy } from "./config.js";
+import { loadConfig, saveConfig, biometricRequired, type Policy } from "./config.js";
 import { normalizeSecret, generateCode } from "./totp.js";
 import { TelegramApprover, discoverChatId } from "./telegram.js";
 import { serve } from "./server.js";
@@ -322,9 +322,24 @@ async function cmdBiometric(mode?: string): Promise<void> {
     console.error("Usage: sandgate biometric <on|off>");
     process.exit(1);
   }
+  // Turning a protection off must cost the passphrase, so the flag lives
+  // in the vault — not in a plaintext file anyone could edit.
+  const prompter = new Prompter();
+  const pass = await getPassphrase(prompter);
+  prompter.close();
+  const data = loadVault(pass);
+  if (mode === "on" && !data.biometric) {
+    console.error("Nothing enrolled yet. Run `sandgate enroll-biometric` first.");
+    process.exit(1);
+  }
+  data.requireBiometric = mode === "on";
+  saveVault(pass, data);
+  // Retire the legacy plaintext flag so the two can never disagree.
   const config = loadConfig();
-  config.requireBiometric = mode === "on";
-  saveConfig(config);
+  if (config.requireBiometric) {
+    config.requireBiometric = false;
+    saveConfig(config);
+  }
   console.log(
     mode === "on"
       ? "Biometric approvals required. Every approval must now be signed by the enrolled device."
@@ -347,6 +362,7 @@ async function cmdStatus(): Promise<void> {
     ? readFileSync(auditPath(), "utf8").trim().split("\n").filter(Boolean).length
     : 0;
 
+  const requiresBio = biometricRequired(data, config);
   const approval = data.pwa
     ? `PWA via ${data.pwa.relayUrl} (Telegram ${data.telegram ? "fallback" : "not set"})`
     : data.telegram
@@ -375,7 +391,7 @@ async function cmdStatus(): Promise<void> {
   );
   console.log(
     `  biometric          ${
-      config.requireBiometric
+      requiresBio
         ? data.biometric
           ? "required (enrolled)"
           : "REQUIRED BUT NOT ENROLLED — run `sandgate enroll-biometric`"
@@ -498,7 +514,7 @@ async function cmdTestApproval(): Promise<void> {
     const config = loadConfig();
     approver = pwaApproverFrom(data, config)!;
     console.log(
-      config.requireBiometric
+      biometricRequired(data, config)
         ? "Sending test approval to the paired PWA — Face ID required (60s timeout)…"
         : "Sending test approval to the paired PWA (60s timeout)…"
     );
