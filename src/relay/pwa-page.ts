@@ -504,30 +504,56 @@ export const PWA_HTML = `<!doctype html>
       })
     : Promise.resolve(null);
 
+  /** Tell the relay this device's push endpoint serves these vaults. */
+  function registerSubscription(sub) {
+    return Promise.all(
+      pairs.map(function (p) {
+        return fetch("/api/subscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pairId: p.pairId, subscription: sub }),
+        });
+      })
+    );
+  }
+
+  /**
+   * Re-register the existing subscription for EVERY vault on every load.
+   * Vaults are registered one by one against a device subscription, so a
+   * vault added after notifications were switched on would otherwise
+   * never ring — which is exactly what happened with the first server.
+   * getSubscription needs no permission and no user gesture.
+   */
+  async function syncSubscription() {
+    var reg = await swRegPromise;
+    if (!reg || !("PushManager" in window)) return false;
+    var existing = await reg.pushManager.getSubscription();
+    if (!existing) return false;
+    await registerSubscription(existing);
+    pushOn = true;
+    setStatus("push on");
+    return true;
+  }
+
   async function enablePush() {
     var reg = await swRegPromise;
     if (!reg || !("PushManager" in window)) return false;
-    // iOS only shows the permission prompt inside a user gesture, and only
-    // in the installed app — never in Safari tabs.
-    var perm = await Notification.requestPermission();
-    if (perm !== "granted") return false;
+    // Only ask when we actually need to: on iOS, requestPermission outside
+    // a user gesture can fail even when permission was already granted.
+    if (Notification.permission !== "granted") {
+      var perm = await Notification.requestPermission();
+      if (perm !== "granted") return false;
+    }
     var vapid = await (await fetch("/api/vapid")).json();
     var sub = await reg.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: b64uToBytes(vapid.publicKey),
     });
-    // One device subscription, registered for every paired vault.
-    await Promise.all(pairs.map(function (p) {
-      return fetch("/api/subscribe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pairId: p.pairId, subscription: sub }),
-      });
-    }));
+    await registerSubscription(sub);
     pushOn = true;
     setStatus("push on");
     var btn = document.getElementById("pushBtn");
-    if (btn) btn.parentElement.remove();
+    if (btn && btn.parentElement) btn.parentElement.remove();
     return true;
   }
 
@@ -540,14 +566,20 @@ export const PWA_HTML = `<!doctype html>
     );
   }
 
-  function offerPush() {
-    if (!("Notification" in window) || !("PushManager" in window)) return;
-    if (isIOS && !standalone) return; // impossible in Safari tabs; banner handles install
-    if (Notification.permission === "granted") {
-      enablePush().catch(showPushError);
+  (async function () {
+    try {
+      if (await syncSubscription()) return; // already on, every vault covered
+    } catch (e) { /* fall through to the button */ }
+
+    if (!("Notification" in window) || !("PushManager" in window)) {
+      setStatus(sseOn ? "live" : "polling", "warn");
       return;
     }
-    if (Notification.permission === "denied") return;
+    if (isIOS && !standalone) return; // impossible in a Safari tab; the banner explains
+    if (Notification.permission === "denied") {
+      setStatus("notifications blocked", "warn");
+      return;
+    }
     var b = document.createElement("div");
     b.className = "banner";
     b.innerHTML =
@@ -557,8 +589,7 @@ export const PWA_HTML = `<!doctype html>
     document.getElementById("pushBtn").addEventListener("click", function () {
       enablePush().catch(showPushError);
     });
-  }
-  offerPush();
+  })();
 
   // --- live updates: SSE with a slow safety poll ---------------------------
   var sseOn = false;

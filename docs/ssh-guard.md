@@ -102,6 +102,28 @@ This is the real risk — the cryptography is the easy part.
 - Keep `timeoutSec` below sshd's `LoginGraceTime` (120s by default), or
   sshd hangs up before you have finished deciding.
 
+## Other distributions
+
+Tested on Ubuntu 24.04. The installer adapts to what it finds, but two
+families deserve a warning rather than a promise:
+
+**Debian/Ubuntu** — the tested path. `sshd_config.d` exists and is
+included from the top of `sshd_config`, so the directives go in a
+drop-in read before everything else.
+
+**RHEL / Rocky / Alma 9** — same layout, so the drop-in path applies.
+Node comes from `dnf` or NodeSource rather than `apt`. **SELinux is the
+real obstacle**: `sshd_t` executing a Node binary and opening a network
+connection during authentication is exactly what the default policy is
+built to refuse, and denials surface as AVC messages in
+`/var/log/audit/audit.log`. Expect to write a small policy module before
+this works. Untested; treat it as a project, not a command.
+
+**RHEL 8 and other older releases** — OpenSSH predating 8.2 has no
+`Include`, so there is no drop-in directory. The installer detects that
+and prepends its directives to `sshd_config` instead, which is correct
+because sshd keeps the first value it sees.
+
 ## Options
 
 ```jsonc

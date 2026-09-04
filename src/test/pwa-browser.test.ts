@@ -173,3 +173,70 @@ test("Deny works and corrupt stored pairings do not break the page", async () =>
     relay.close();
   }
 });
+
+test("a vault added later is registered for push as well", async () => {
+  const relay = await startRelay({
+    port: 0,
+    stateDir: mkdtempSync(join(tmpdir(), "sandgate-relay-")),
+  });
+  const relayUrl = `http://localhost:${relay.port}`;
+  try {
+    const laptop = newPairing();
+    const server = newPairing();
+    const subscription = {
+      endpoint: "https://push.example/abc",
+      keys: { p256dh: "x", auth: "y" },
+    };
+
+    const { close } = await loadPage(relayUrl, {
+      // A phone that already had one vault and just added a second.
+      localStorage: {
+        sandgate_pairs: JSON.stringify([
+          { name: "Laptop", pairId: laptop.pairId, secret: laptop.secret },
+          { name: "vps-prod", pairId: server.pairId, secret: server.secret },
+        ]),
+      },
+      beforeScript: (window) => {
+        // Notifications were switched on long ago: the subscription
+        // already exists, and no permission prompt happens.
+        Object.defineProperty(window.navigator, "serviceWorker", {
+          configurable: true,
+          value: {
+            register: async () => ({
+              pushManager: {
+                getSubscription: async () => subscription,
+                subscribe: async () => subscription,
+              },
+            }),
+            addEventListener: () => {},
+          },
+        });
+        window.PushManager = function () {};
+        window.Notification = { permission: "granted", requestPermission: async () => "granted" };
+      },
+    });
+
+    try {
+      // Registering only at enable-time left vaults added afterwards
+      // silent — a real server never rang.
+      const isSubscribed = async (pairId: string) => {
+        const status = (await (
+          await fetch(`${relayUrl}/api/pair-status?pairId=${pairId}`)
+        ).json()) as { subscribed: boolean };
+        return status.subscribed;
+      };
+      for (const pairing of [laptop, server]) {
+        let subscribed = false;
+        for (let i = 0; i < 100 && !subscribed; i++) {
+          subscribed = await isSubscribed(pairing.pairId);
+          if (!subscribed) await new Promise((r) => setTimeout(r, 50));
+        }
+        assert.equal(subscribed, true, "every paired vault must be reachable by push");
+      }
+    } finally {
+      close();
+    }
+  } finally {
+    relay.close();
+  }
+});

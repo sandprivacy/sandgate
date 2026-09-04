@@ -11,6 +11,8 @@ export async function loadPage(
   opts: {
     hash?: string;
     localStorage?: Record<string, string>;
+    /** Prepare the window (stub APIs jsdom lacks) before the page runs. */
+    beforeScript?: (window: any) => void;
   }
 ): Promise<{ window: any; alerts: string[]; close: () => void }> {
   const alerts: string[] = [];
@@ -30,6 +32,7 @@ export async function loadPage(
       w.localStorage.setItem(key, value);
     }
   }
+  opts.beforeScript?.(w);
   // Execute the page's inline script exactly as a browser would. The
   // decision alert is instrumented to carry the full stack: a one-line
   // message told us nothing the day this layer was missing.
