@@ -38,7 +38,57 @@ export function pwaManifest(opts: { includeStartUrl: boolean }): string {
   });
 }
 
+/**
+ * Crypto for the service worker: a mirror of pwacrypto.ts (and of the
+ * page's inline copy). Kept as its own string so the worker can share it
+ * without dragging the page along.
+ */
+export const PWA_CRYPTO_JS = `
+function b64uToBytes(s) {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  var bin = atob(s), out = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function bytesToB64u(buf) {
+  var bytes = new Uint8Array(buf), bin = "";
+  for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/, "");
+}
+var enc = new TextEncoder(), dec = new TextDecoder();
+async function deriveKeyFrom(secretB64u, info) {
+  var raw = await crypto.subtle.importKey("raw", b64uToBytes(secretB64u), "HKDF", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: enc.encode("sandgate-pwa-v1"), info: enc.encode(info) },
+    raw, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
+  );
+}
+async function openWith(key, sealed, aad) {
+  var plain = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: b64uToBytes(sealed.iv), additionalData: enc.encode(aad) },
+    key, b64uToBytes(sealed.ct)
+  );
+  return JSON.parse(dec.decode(plain));
+}
+async function sealWith(key, payload, aad) {
+  var iv = crypto.getRandomValues(new Uint8Array(12));
+  var ct = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: iv, additionalData: enc.encode(aad) },
+    key, enc.encode(JSON.stringify(payload))
+  );
+  return { iv: bytesToB64u(iv), ct: bytesToB64u(ct) };
+}
+`;
+
+/**
+ * The page mirrors its pairings into the Cache API under this key so the
+ * worker — which cannot read localStorage — can decrypt a push and show
+ * what is actually being asked. Same origin, same device, same sandbox.
+ */
+export const PWA_STORE_URL = "/__sandgate/store";
+
 export const PWA_SW = `
+${PWA_CRYPTO_JS}
 self.addEventListener("install", function () { self.skipWaiting(); });
 self.addEventListener("activate", function (e) { e.waitUntil(self.clients.claim()); });
 // A fetch handler is required for Chrome's install prompt. Handle ONLY
@@ -49,21 +99,103 @@ self.addEventListener("fetch", function (e) {
   if (e.request.method !== "GET") return;
   e.respondWith(fetch(e.request));
 });
-self.addEventListener("push", function (e) {
-  e.waitUntil((async function () {
-    await self.registration.showNotification("sandgate", {
+
+async function loadStore() {
+  try {
+    var cache = await caches.open("sandgate-store");
+    var hit = await cache.match("${PWA_STORE_URL}");
+    if (hit) return await hit.json();
+  } catch (e) {}
+  return { pairs: [], details: true };
+}
+async function refreshPages() {
+  var list = await self.clients.matchAll({ type: "window" });
+  list.forEach(function (c) { c.postMessage("refresh"); });
+}
+
+// What the notification says. Generic when the worker cannot read the
+// request (unknown vault, details switched off, older relay): the phone
+// then behaves exactly as before — a tap opens the app.
+async function describePush(data, store) {
+  var out = {
+    title: "sandgate",
+    options: {
       body: "Approval requested — tap to answer",
-      tag: "sandgate-approval",
+      tag: "sandgate-" + (data && data.requestId ? data.requestId : "approval"),
       renotify: true,
       icon: "/icon-192.png",
       badge: "/icon-192.png",
-    });
-    var clientList = await self.clients.matchAll({ type: "window" });
-    clientList.forEach(function (c) { c.postMessage("refresh"); });
+      data: {},
+    },
+  };
+  if (!data || !data.pairId || !data.payload || store.details === false) return out;
+  var pair = null;
+  for (var i = 0; i < store.pairs.length; i++) if (store.pairs[i].pairId === data.pairId) pair = store.pairs[i];
+  if (!pair) return out;
+  try {
+    var key = await deriveKeyFrom(pair.secret, "approval-channel");
+    var req = await openWith(key, data.payload, "req:" + data.requestId);
+    out.title = (store.pairs.length > 1 && pair.name ? pair.name + ": " : "") + req.title;
+    out.options.body = req.body || (req.kind === "input" ? "Tap to answer" : "Tap to decide");
+    out.options.data = {
+      pairId: data.pairId,
+      requestId: data.requestId,
+      kind: req.kind,
+      requireBiometric: !!req.requireBiometric,
+    };
+    // Yes/no straight from the lock screen — but never past a biometric
+    // requirement, which only the page can satisfy.
+    if (req.kind === "approval" && !req.requireBiometric) {
+      out.options.actions = [
+        { action: "approve", title: "Approve" },
+        { action: "deny", title: "Deny" },
+      ];
+    }
+  } catch (e) {}
+  return out;
+}
+
+self.addEventListener("push", function (e) {
+  e.waitUntil((async function () {
+    var data = null;
+    try { data = e.data ? e.data.json() : null; } catch (err) {}
+    var store = await loadStore();
+    var desc = await describePush(data, store);
+    await self.registration.showNotification(desc.title, desc.options);
+    await refreshPages();
   })());
 });
+
+async function answerFromNotification(d, approved) {
+  var store = await loadStore();
+  var pair = null;
+  for (var i = 0; i < store.pairs.length; i++) if (store.pairs[i].pairId === d.pairId) pair = store.pairs[i];
+  if (!pair) return self.clients.openWindow("/");
+  var key = await deriveKeyFrom(pair.secret, "approval-channel");
+  var payload = await sealWith(
+    key,
+    { requestId: d.requestId, approved: approved, ts: Date.now(), deviceId: store.deviceId },
+    "dec:" + d.requestId
+  );
+  var res = await fetch("/api/decision", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pairId: d.pairId, requestId: d.requestId, payload: payload }),
+  });
+  await self.registration.showNotification(
+    res.ok ? (approved ? "Approved" : "Denied") : "Could not send your answer",
+    { body: res.ok ? "" : "Open the app to try again.", tag: "sandgate-" + d.requestId, icon: "/icon-192.png" }
+  );
+  await refreshPages();
+}
+
 self.addEventListener("notificationclick", function (e) {
   e.notification.close();
+  var d = e.notification.data || {};
+  if ((e.action === "approve" || e.action === "deny") && d.pairId && d.requestId) {
+    e.waitUntil(answerFromNotification(d, e.action === "approve"));
+    return;
+  }
   e.waitUntil((async function () {
     var clientList = await self.clients.matchAll({ type: "window" });
     if (clientList.length) return clientList[0].focus();
@@ -313,9 +445,35 @@ export const PWA_HTML = `<!doctype html>
     return [];
   }
   var pairs = loadPairs();
+  // This device's identity in decisions: lets a gateway that wants several
+  // approvals tell two phones apart. Random, local, never a person.
+  var DEVICE_KEY = "sandgate_device";
+  var deviceId = null;
+  try { deviceId = localStorage.getItem(DEVICE_KEY); } catch (e) {}
+  if (!deviceId) {
+    deviceId = bytesToB64u(crypto.getRandomValues(new Uint8Array(12)));
+    try { localStorage.setItem(DEVICE_KEY, deviceId); } catch (e) {}
+  }
+  var DETAILS_KEY = "sandgate_notif_details";
+  function notifDetails() {
+    try { return localStorage.getItem(DETAILS_KEY) !== "off"; } catch (e) { return true; }
+  }
+  // The worker cannot read localStorage; hand it what it needs to show a
+  // real title on the lock screen and answer from there.
+  function syncStore() {
+    if (!("caches" in window)) return;
+    caches.open("sandgate-store").then(function (cache) {
+      return cache.put("${PWA_STORE_URL}", new Response(
+        JSON.stringify({ pairs: pairs, details: notifDetails(), deviceId: deviceId }),
+        { headers: { "Content-Type": "application/json" } }
+      ));
+    }).catch(function () {});
+  }
   function savePairs() {
     try { localStorage.setItem(PAIRS_KEY, JSON.stringify(pairs)); } catch (e) {}
+    syncStore();
   }
+  syncStore();
   function addPairing(parsed) {
     for (var i = 0; i < pairs.length; i++) {
       if (pairs[i].pairId === parsed.pairId) return false;
@@ -895,6 +1053,7 @@ export const PWA_HTML = `<!doctype html>
     if (!c || c.done) return;
     btn.disabled = true;
     try {
+      decisionBody.deviceId = deviceId;
       var payload = await sealPayload(c.pair, decisionBody, "dec:" + c.requestId);
       var res = await fetch("/api/decision", {
         method: "POST",
@@ -948,6 +1107,19 @@ export const PWA_HTML = `<!doctype html>
       row.appendChild(t); row.appendChild(x);
       section.appendChild(row);
     });
+    var detRow = document.createElement("div"); detRow.className = "hrow";
+    var detLabel = document.createElement("span"); detLabel.className = "t";
+    detLabel.textContent = "Show details in notifications";
+    var detToggle = document.createElement("span"); detToggle.className = "d " + (notifDetails() ? "approved" : "denied");
+    detToggle.textContent = notifDetails() ? "on" : "off";
+    detToggle.style.cursor = "pointer";
+    detToggle.onclick = function () {
+      try { localStorage.setItem(DETAILS_KEY, notifDetails() ? "off" : "on"); } catch (e) {}
+      syncStore();
+      renderVaults();
+    };
+    detRow.appendChild(detLabel); detRow.appendChild(detToggle);
+    section.appendChild(detRow);
     var addRow = document.createElement("div"); addRow.className = "hrow";
     var add = document.createElement("span"); add.className = "d approved"; add.textContent = "+ add a vault";
     add.style.cursor = "pointer";

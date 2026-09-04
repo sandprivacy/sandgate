@@ -286,8 +286,20 @@ export async function startRelay(opts: {
           waiters: [],
         });
         if (pairing.subscription) {
+          // The sealed request rides along: the service worker on the
+          // phone holds the pairing key and can show the real title —
+          // Web Push payloads are end-to-end encrypted (RFC 8291), so
+          // Apple and Google see nothing. The relay still reads nothing.
           webpush
-            .sendNotification(pairing.subscription, JSON.stringify({ type: "approval" }))
+            .sendNotification(
+              pairing.subscription,
+              JSON.stringify({
+                type: "approval",
+                pairId: body.pairId,
+                requestId: body.requestId,
+                payload: body.payload,
+              })
+            )
             .catch((err: any) => {
               // Phone offline / stale sub is normal (PWA polls anyway), but
               // ops must be able to SEE a push service rejecting us.
