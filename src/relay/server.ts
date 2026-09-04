@@ -24,6 +24,8 @@ interface RelayRequestEntry {
 interface Pairing {
   subscription?: webpush.PushSubscription;
   requests: Map<string, RelayRequestEntry>;
+  /** Timestamps of recent requests, for the per-pairing rate limit. */
+  recent: number[];
   /** Open SSE responses from PWA pages; notified on new requests/decisions. */
   listeners: Set<ServerResponse>;
   /** Last time a PWA page with this pairing said hello (push or not). */
@@ -32,6 +34,16 @@ interface Pairing {
 
 const MAX_BODY = 64 * 1024;
 const REQUEST_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * Per-pairing limits. Notification fatigue is a real attack: a
+ * compromised gateway or server could bury the phone under approval
+ * requests until someone taps yes out of reflex. A pairing that exceeds
+ * these is told to stop, and the gateway treats that as a refusal.
+ */
+const RATE_WINDOW_MS = 60 * 1000;
+const MAX_REQUESTS_PER_WINDOW = 12;
+const MAX_UNDECIDED = 5;
 
 export async function startRelay(opts: {
   port: number;
@@ -65,6 +77,7 @@ export async function startRelay(opts: {
         subscription: state.subscriptions[pairId],
         requests: new Map(),
         listeners: new Set(),
+        recent: [],
       };
       pairings.set(pairId, p);
     }
@@ -203,6 +216,22 @@ export async function startRelay(opts: {
           return json(res, 400, { error: "pairId, requestId, payload required" });
         }
         const pairing = getPairing(body.pairId);
+
+        const now = Date.now();
+        pairing.recent = pairing.recent.filter((t) => now - t < RATE_WINDOW_MS);
+        let undecided = 0;
+        for (const entry of pairing.requests.values()) {
+          if (entry.decision === undefined && now - entry.ts < REQUEST_TTL_MS) undecided++;
+        }
+        if (pairing.recent.length >= MAX_REQUESTS_PER_WINDOW || undecided >= MAX_UNDECIDED) {
+          return json(res, 429, {
+            error:
+              "Too many approval requests for this pairing. The phone is being flooded; " +
+              "answer or let the pending ones expire.",
+          });
+        }
+        pairing.recent.push(now);
+
         pairing.requests.set(body.requestId, {
           requestId: body.requestId,
           payload: body.payload,

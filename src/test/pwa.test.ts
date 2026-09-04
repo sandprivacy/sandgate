@@ -176,3 +176,33 @@ test("a relay cannot forge an approval (bad blob is rejected, request times out)
     relay.close();
   }
 });
+
+test("a pairing cannot flood the phone with approval requests", async () => {
+  const relay = await startRelay({
+    port: 0,
+    stateDir: mkdtempSync(join(tmpdir(), "sandgate-relay-")),
+  });
+  const relayUrl = `http://localhost:${relay.port}`;
+  try {
+    const pairing = newPairing();
+    const key = deriveKey(pairing.secret);
+    const post = (i: number) =>
+      fetch(`${relayUrl}/api/request`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pairId: pairing.pairId,
+          requestId: `flood${i}${"x".repeat(8)}`,
+          payload: seal(key, { title: "spam" }, aadForRequest(`flood${i}${"x".repeat(8)}`)),
+        }),
+      });
+
+    // A handful of pending requests is normal; a flood is not.
+    const codes: number[] = [];
+    for (let i = 0; i < 12; i++) codes.push((await post(i)).status);
+    assert.ok(codes.includes(429), `no request was ever refused: ${codes.join(",")}`);
+    assert.equal(codes[0], 200, "the first request must still go through");
+  } finally {
+    relay.close();
+  }
+});
