@@ -494,9 +494,14 @@ async function cmdTestApproval(): Promise<void> {
   const data = loadVault(pass);
   let approver;
   if (data.pwa) {
-    const { PwaApprover } = await import("./pwa-approver.js");
-    approver = new PwaApprover(data.pwa);
-    console.log("Sending test approval to the paired PWA (60s timeout)…");
+    const { pwaApproverFrom } = await import("./pwa-approver.js");
+    const config = loadConfig();
+    approver = pwaApproverFrom(data, config)!;
+    console.log(
+      config.requireBiometric
+        ? "Sending test approval to the paired PWA — Face ID required (60s timeout)…"
+        : "Sending test approval to the paired PWA (60s timeout)…"
+    );
   } else if (data.telegram) {
     approver = new TelegramApprover(data.telegram.botToken, data.telegram.chatId);
     console.log("Sending test approval to Telegram (60s timeout)…");

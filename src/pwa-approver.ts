@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { Approver, ApprovalRequest, ApprovalResult, AskResult } from "./telegram.js";
+import type { VaultData } from "./vault.js";
+import type { Config } from "./config.js";
 import { deriveKey, seal, open, aadForRequest, aadForDecision } from "./pwacrypto.js";
 import {
   verifyAssertion,
@@ -147,4 +149,18 @@ export class PwaApprover implements Approver {
       origin: new URL(this.config.relayUrl).origin,
     });
   }
+}
+
+/**
+ * Build the PWA approver from vault + config. Everything that talks to the
+ * phone goes through here: when `serve` and the CLI each assembled their
+ * own config, the CLI silently lost biometric enforcement.
+ */
+export function pwaApproverFrom(vault: VaultData, config: Config): PwaApprover | null {
+  if (!vault.pwa) return null;
+  return new PwaApprover({
+    ...vault.pwa,
+    biometric: vault.biometric,
+    requireBiometric: config.requireBiometric,
+  });
 }
