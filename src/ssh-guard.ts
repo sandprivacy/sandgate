@@ -134,7 +134,7 @@ export async function decideLogin(
 }
 
 /** The lines a sysadmin must add. Printed, never applied behind your back. */
-export function installInstructions(configPath: string, binary: string): string {
+export function installInstructions(configPath: string, hookCommand: string): string {
   return `sandgate ssh-guard — manual install (deliberately manual: a mistake here
 locks you out of the machine).
 
@@ -146,7 +146,7 @@ KEEP A SECOND SSH SESSION OPEN until you have tested a new login.
      sudo chmod 600 ${configPath}
 
 2. Add the approval hook, as the LAST auth line in /etc/pam.d/sshd:
-     auth required pam_exec.so quiet ${binary} ssh-guard approve
+     auth required pam_exec.so quiet ${hookCommand}
 
 3. Public-key logins skip the PAM auth stack, so force it in
    /etc/ssh/sshd_config:

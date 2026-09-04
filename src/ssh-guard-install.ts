@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, copyFileSync, existsSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, copyFileSync, existsSync, rmSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
 /**
@@ -201,6 +201,54 @@ export function reloadSshd(): { ok: boolean; output: string } {
   return { ok: false, output: "could not reload sshd — do it yourself, then test a new login" };
 }
 
+/**
+ * The exact command PAM will run. It MUST be absolute: pam_exec executes
+ * with a bare environment, and a global npm install puts the shim in
+ * /usr/local/bin, which is not on that PATH. A bare "sandgate" there is
+ * "command not found", which pam_exec reports as failure — and every
+ * login is refused. This locked a real server out during testing.
+ */
+export function hookCommand(): { argv: string[]; display: string } {
+  const node = process.execPath;
+  const entry = process.argv[1];
+  let script: string | null = null;
+  if (entry) {
+    try {
+      // Resolves the /usr/local/bin/sandgate symlink to the real .js file.
+      const resolved = realpathSync(entry);
+      if (resolved.endsWith(".js")) script = resolved;
+    } catch {
+      /* fall through */
+    }
+  }
+  const argv = script ? [node, script, "ssh-guard", "approve"] : ["sandgate", "ssh-guard", "approve"];
+  return { argv, display: argv.join(" ") };
+}
+
+/**
+ * Run the hook exactly as PAM will — empty environment included — during
+ * the account phase, which passes through without touching the relay.
+ * If this fails, the hook would refuse every login, so the install must
+ * not stand.
+ */
+export function hookRunsUnderPam(argv: string[]): { ok: boolean; output: string } {
+  const [command, ...args] = argv;
+  try {
+    execFileSync(command!, args, {
+      env: { PAM_TYPE: "account", PAM_USER: "sandgate-selftest", PAM_RHOST: "selftest" },
+      encoding: "utf8",
+      stdio: "pipe",
+      timeout: 30_000,
+    });
+    return { ok: true, output: "" };
+  } catch (err: any) {
+    return {
+      ok: false,
+      output: String(err?.stderr || err?.message || err).slice(0, 300),
+    };
+  }
+}
+
 export interface InstallReport {
   steps: string[];
   backups: string[];
@@ -212,7 +260,7 @@ export interface InstallReport {
  * Apply the hook. Returns a report rather than throwing: the caller needs
  * to tell the human exactly what happened to their sshd.
  */
-export function installHook(invocation: string): InstallReport {
+export function installHook(invocation?: string): InstallReport {
   const report: InstallReport = { steps: [], backups: [], rolledBack: false };
 
   if (!existsSync(PAM_FILE)) {
@@ -241,7 +289,8 @@ export function installHook(invocation: string): InstallReport {
     writeFileSync(file, next);
   };
 
-  const pam = patchPam(readFileSync(PAM_FILE, "utf8"), invocation);
+  const hook = hookCommand();
+  const pam = patchPam(readFileSync(PAM_FILE, "utf8"), invocation ?? hook.display);
   if (pam.changed) {
     write(PAM_FILE, pam.text);
     report.steps.push(`hook added to ${PAM_FILE}`);

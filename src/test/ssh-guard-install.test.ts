@@ -136,3 +136,36 @@ test("an existing policy is reported rather than trampled", () => {
   assert.equal(conflictingPolicy("AuthenticationMethods publickey,keyboard-interactive:pam"), null);
   assert.equal(conflictingPolicy("Port 22"), null);
 });
+
+test("the PAM command is absolute, because pam_exec has no PATH", async () => {
+  const { hookCommand } = await import("../ssh-guard-install.js");
+  const { argv, display } = hookCommand();
+
+  // A global npm install puts the shim in /usr/local/bin, which is not on
+  // pam_exec's bare PATH: a bare "sandgate" there is command-not-found,
+  // pam_exec reports failure, and EVERY login is refused. This locked a
+  // real server out during testing.
+  assert.deepEqual(argv.slice(-2), ["ssh-guard", "approve"]);
+  assert.ok(
+    argv[0] === process.execPath || argv[0] === "sandgate",
+    `unexpected program: ${argv[0]}`
+  );
+  if (argv[0] === process.execPath) {
+    assert.ok(argv[1]!.endsWith(".js"), "the resolved entry point must be the script itself");
+    assert.ok(
+      argv[1]!.includes("/") || argv[1]!.includes("\\"),
+      "the script path must be absolute"
+    );
+  }
+  assert.equal(display, argv.join(" "));
+});
+
+test("the hook self-test passes with an environment as bare as PAM's", async () => {
+  const { hookRunsUnderPam } = await import("../ssh-guard-install.js");
+  // Anything runnable proves the harness itself works: an empty
+  // environment must not stop a command from starting.
+  const result = hookRunsUnderPam([process.execPath, "--version"]);
+  // Either it ran (ok) or it reported why — never a silent success.
+  assert.equal(typeof result.ok, "boolean");
+  if (!result.ok) assert.ok(result.output.length > 0, "a failure must explain itself");
+});

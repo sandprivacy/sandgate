@@ -62,9 +62,9 @@ export async function runSshGuard(
   }
 }
 
-function binaryInvocation(): string {
-  const entry = process.argv[1];
-  return entry && entry.endsWith(".js") ? `${process.execPath} ${entry}` : "sandgate";
+async function binaryInvocation(): Promise<string> {
+  const { hookCommand } = await import("./ssh-guard-install.js");
+  return hookCommand().display;
 }
 
 /**
@@ -205,7 +205,7 @@ async function setup(configPath: string, blob: string | undefined): Promise<void
   writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
   console.log(`  config written to ${configPath} (root, 0600)`);
 
-  const report = installHook(binaryInvocation());
+  const report = installHook();
   for (const step of report.steps) console.log(`  ${step}`);
   if (report.backups.length) console.log(`  backups: ${report.backups.join(", ")}`);
   if (report.error) {
@@ -236,7 +236,7 @@ async function install(configPath: string, manual: boolean): Promise<void> {
   } = await import("./ssh-guard-install.js");
 
   if (manual) {
-    console.log(installInstructions(configPath, binaryInvocation()));
+    console.log(installInstructions(configPath, await binaryInvocation()));
     return;
   }
   if (!isRoot()) {
@@ -251,7 +251,7 @@ async function install(configPath: string, manual: boolean): Promise<void> {
     process.exit(1);
   }
 
-  const report = installHook(binaryInvocation());
+  const report = installHook();
   for (const step of report.steps) console.log(`  ${step}`);
   if (report.backups.length) {
     console.log(`  backups: ${report.backups.join(", ")}`);
