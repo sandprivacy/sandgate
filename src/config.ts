@@ -23,6 +23,11 @@ export interface Config {
   };
   approvalTimeoutSec: number;
   /**
+   * Which configured channel receives requests. Unset: the phone if
+   * paired, else Slack, else Telegram. `sandgate channel <name>` sets it.
+   */
+  approvalChannel?: "phone" | "slack" | "telegram";
+  /**
    * @deprecated moved into the vault (see VaultData.requireBiometric) so
    * that disabling it costs the passphrase. Still read for setups created
    * before 0.3.2; `sandgate biometric on|off` migrates it.

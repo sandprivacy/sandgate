@@ -35,6 +35,8 @@ Usage:
   sandgate totp [domain] [--copy]        Show your own 2FA code (no domain = list them)
   sandgate policy <domain> <auto|approve|deny>   Set the 2FA policy for a domain
   sandgate connect-telegram <bot-token>  Connect (or fix) the Telegram approval channel
+  sandgate connect-slack <bot> <app> <#ch> Approvals in a Slack channel (teams; Node 22+)
+  sandgate channel [phone|slack|telegram] Show or choose where requests go
   sandgate relay [port]                  Run the approval relay (serves the phone PWA)
   sandgate pair <relay-url>              Pair your phone via the relay (E2EE, replaces Telegram)
   sandgate add-device                    Add another phone to the current pairing
@@ -438,11 +440,8 @@ async function cmdStatus(): Promise<void> {
     : 0;
 
   const requiresBio = biometricRequired(data, config);
-  const approval = data.pwa
-    ? `PWA via ${data.pwa.relayUrl} (Telegram ${data.telegram ? "fallback" : "not set"})`
-    : data.telegram
-      ? "Telegram"
-      : "none — run `sandgate pair <relay-url>` or `sandgate connect-telegram <token>`";
+  const { describeChannel } = await import("./channels.js");
+  const approval = describeChannel(data, loadConfig());
   const inboxLine = data.sandmail
     ? "sandmail" + (data.imap ? " (imap configured but sandmail takes precedence)" : "")
     : data.imap
@@ -746,12 +745,10 @@ async function cmdAsk(args: string[]): Promise<void> {
   prompter.close();
   const vault = loadVault(pass);
   const config = loadConfig();
-  const { pwaApproverFrom } = await import("./pwa-approver.js");
-  const approver: Approver | null =
-    pwaApproverFrom(vault, config) ??
-    (vault.telegram ? new TelegramApprover(vault.telegram.botToken, vault.telegram.chatId) : null);
+  const { approverFor } = await import("./channels.js");
+  const approver: Approver | null = approverFor(vault, config);
   if (!approver) {
-    console.error("No approval channel: run `sandgate pair <relay-url>` (or connect Telegram).");
+    console.error("No approval channel: run `sandgate pair <relay-url>`, `sandgate connect-slack …` or connect Telegram.");
     process.exit(2);
   }
   const timeoutSec = parseInt(String(flags.timeout ?? ""), 10) || config.approvalTimeoutSec;
@@ -787,29 +784,84 @@ async function cmdTestApproval(): Promise<void> {
   const pass = await getPassphrase(prompter);
   prompter.close();
   const data = loadVault(pass);
-  let approver;
-  if (data.pwa) {
-    const { pwaApproverFrom } = await import("./pwa-approver.js");
-    const config = loadConfig();
-    approver = pwaApproverFrom(data, config)!;
-    console.log(
-      biometricRequired(data, config)
-        ? "Sending test approval to the paired PWA — Face ID required (60s timeout)…"
-        : "Sending test approval to the paired PWA (60s timeout)…"
-    );
-  } else if (data.telegram) {
-    approver = new TelegramApprover(data.telegram.botToken, data.telegram.chatId);
-    console.log("Sending test approval to Telegram (60s timeout)…");
-  } else {
-    console.error("No approval channel. Run `sandgate connect-telegram <bot-token>` or `sandgate pair <relay-url>`.");
+  const config = loadConfig();
+  const { approverFor, describeChannel } = await import("./channels.js");
+  const approver = approverFor(data, config);
+  if (!approver) {
+    console.error(`No approval channel. ${describeChannel(data, config)}`);
     process.exit(1);
   }
+  console.log(`Sending a test approval — ${describeChannel(data, config)} (60s timeout)…`);
   const result = await approver.request({
     title: "Test from sandgate",
     body: "Tap Approve to confirm your approval channel works.",
     timeoutSec: 60,
   });
   console.log(`Result: ${result.decision}`);
+}
+
+/** Slack for teams: a bot token, an app-level token for Socket Mode, a channel. */
+async function cmdConnectSlack(args: string[]): Promise<void> {
+  const [botToken, appToken, channel, ...rest] = args;
+  const approvers = rest.includes("--approvers")
+    ? (rest[rest.indexOf("--approvers") + 1] ?? "").split(",").map((u) => u.trim()).filter(Boolean)
+    : [];
+  if (!botToken?.startsWith("xoxb-") || !appToken?.startsWith("xapp-") || !channel) {
+    console.error(
+      "Usage: sandgate connect-slack <xoxb-bot-token> <xapp-app-token> <#channel> [--approvers U123,U456]\n\n" +
+        "Create a Slack app (api.slack.com/apps) with:\n" +
+        "  - Socket Mode ON, and an app-level token with connections:write  (xapp-…)\n" +
+        "  - Bot scopes: chat:write, channels:read, groups:read           (xoxb-…)\n" +
+        "  - Interactivity ON (no request URL needed with Socket Mode)\n" +
+        "  - Install to workspace, then /invite the bot into the channel\n" +
+        "--approvers limits who can decide (Slack user ids); without it, anyone in the channel can."
+    );
+    process.exit(1);
+  }
+  const { verifySlack } = await import("./slack.js");
+  const info = await verifySlack({ botToken, appToken, channel });
+  const prompter = new Prompter();
+  const pass = await getPassphrase(prompter);
+  prompter.close();
+  const data = loadVault(pass);
+  data.slack = { botToken, appToken, channel: info.channelId, approvers, quorum: data.slack?.quorum };
+  saveVault(pass, data);
+  const config = loadConfig();
+  const { chooseChannel } = await import("./channels.js");
+  console.log(
+    `Connected to ${info.team} as @${info.bot}, channel ${info.channelId}` +
+      (approvers.length ? `, approvers: ${approvers.join(", ")}` : ", anyone in the channel can decide") +
+      ".\n" +
+      (chooseChannel(data, config) === "slack"
+        ? "Slack is now the approval channel. Try: sandgate test-approval"
+        : "Your phone stays the approval channel; switch with: sandgate channel slack")
+  );
+}
+
+/** Which configured channel gets the requests. */
+async function cmdChannel(name?: string): Promise<void> {
+  const prompter = new Prompter();
+  const pass = await getPassphraseQuick(prompter);
+  prompter.close();
+  const data = loadVault(pass);
+  const config = loadConfig();
+  const { availableChannels, describeChannel } = await import("./channels.js");
+  if (!name) {
+    console.log(`Approval channel: ${describeChannel(data, config)}`);
+    return;
+  }
+  const available = availableChannels(data);
+  if (name !== "phone" && name !== "slack" && name !== "telegram") {
+    console.error("Usage: sandgate channel <phone|slack|telegram>");
+    process.exit(1);
+  }
+  if (!available.includes(name)) {
+    console.error(`${name} is not configured. Available: ${available.join(", ") || "none"}`);
+    process.exit(1);
+  }
+  config.approvalChannel = name;
+  saveConfig(config);
+  console.log(`Approval channel: ${describeChannel(data, config)}`);
 }
 
 async function main(): Promise<void> {
@@ -831,6 +883,10 @@ async function main(): Promise<void> {
       return cmdConnectImap();
     case "test-approval":
       return cmdTestApproval();
+    case "connect-slack":
+      return cmdConnectSlack(args);
+    case "channel":
+      return cmdChannel(args[0]);
     case "relay":
       return cmdRelay(args[0]);
     case "pair":

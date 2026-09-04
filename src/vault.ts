@@ -26,6 +26,14 @@ export interface TotpEntry {
 export interface VaultData {
   totp: Record<string, TotpEntry>; // keyed by domain, e.g. "github.com"
   telegram?: { botToken: string; chatId: string };
+  /** A Slack channel, for teams. See slack.ts for what each field is. */
+  slack?: {
+    botToken: string;
+    appToken: string;
+    channel: string;
+    approvers?: string[];
+    quorum?: number;
+  };
   sandmail?: { apiKey: string };
   imap?: {
     host: string;

@@ -4,8 +4,8 @@ import { z } from "zod";
 import { loadVault, type VaultData } from "./vault.js";
 import { loadConfig, totpPolicy, biometricRequired, type Config } from "./config.js";
 import { generateCode } from "./totp.js";
-import { TelegramApprover, type Approver } from "./telegram.js";
-import { pwaApproverFrom } from "./pwa-approver.js";
+import type { Approver } from "./telegram.js";
+import { approverFor } from "./channels.js";
 import { backendFromVault } from "./inbox.js";
 import { audit } from "./audit.js";
 
@@ -35,12 +35,7 @@ export async function serve(passphrase: string): Promise<void> {
     );
   }
 
-  // PWA (E2EE push) wins over Telegram when both are configured.
-  const approver: Approver | null = vault.pwa
-    ? pwaApproverFrom(vault, config)
-    : vault.telegram
-      ? new TelegramApprover(vault.telegram.botToken, vault.telegram.chatId)
-      : null;
+  const approver: Approver | null = approverFor(vault, config);
 
   const inbox = backendFromVault(vault);
 
