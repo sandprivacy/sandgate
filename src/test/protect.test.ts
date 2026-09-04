@@ -22,8 +22,19 @@ function dpapiAvailable(): boolean {
     return false;
   }
 }
+// GitHub's hosted Windows runners ship a PowerShell whose Security module
+// fails to load (duplicate type data) — DPAPI is simply not usable there.
+// The test still runs on every real Windows machine, which is what matters.
+const hostedRunner = process.platform === "win32" && !!process.env.GITHUB_ACTIONS;
 const windowsOnly = {
-  skip: process.platform !== "win32" ? "DPAPI is Windows-only" : dpapiAvailable() ? false : "DPAPI unavailable in this environment",
+  skip:
+    process.platform !== "win32"
+      ? "DPAPI is Windows-only"
+      : hostedRunner
+        ? "hosted GitHub runner: PowerShell Security module is broken there"
+        : dpapiAvailable()
+          ? false
+          : "DPAPI unavailable in this environment",
 };
 
 test("DPAPI protect/decrypt round-trips the passphrase", windowsOnly, () => {
