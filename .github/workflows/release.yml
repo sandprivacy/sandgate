@@ -43,6 +43,7 @@ jobs:
     permissions:
       contents: write
     strategy:
+      fail-fast: false
       matrix:
         target: [bun-linux-x64, bun-linux-arm64]
     steps:
@@ -67,8 +68,12 @@ jobs:
         run: |
           # The account phase returns before any network call: this only
           # proves the binary starts with an empty environment, which is
-          # exactly what pam_exec gives it.
-          env -i PAM_TYPE=account PAM_USER=ci PAM_RHOST=ci ./sandgate-linux-x64 ssh-guard approve
+          # exactly what pam_exec gives it. It still needs a config to
+          # read, as it would on a real server.
+          echo '{"relayUrl":"https://relay.invalid","pairId":"ci-ci-ci-ci","secret":"ci-ci-ci-ci","serverName":"ci"}' > /tmp/ssh-guard.json
+          env -i PAM_TYPE=account PAM_USER=ci PAM_RHOST=ci SANDGATE_SSH_GUARD_CONFIG=/tmp/ssh-guard.json ./sandgate-linux-x64 ssh-guard approve
+          echo "binary answered the account phase with exit 0"
+          ./sandgate-linux-x64 --help | head -3
       - uses: softprops/action-gh-release@v2
         with:
           files: sandgate-linux-*
