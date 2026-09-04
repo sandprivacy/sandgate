@@ -67,6 +67,16 @@ the lines before they are applied? `sandgate ssh-guard install --manual`
 prints them and touches nothing, and `install` alone wires up a config
 you placed yourself.
 
+## If you lose access anyway
+
+From your provider's console (this is why it must keep working):
+
+```bash
+sudo sandgate ssh-guard uninstall     # or, by hand:
+sudo rm -f /etc/ssh/sshd_config.d/00-sandgate.conf
+sudo systemctl reload sshd
+```
+
 ## Not locking yourself out
 
 This is the real risk — the cryptography is the easy part.
@@ -83,7 +93,12 @@ This is the real risk — the cryptography is the easy part.
   refuses to call your setup healthy until you have one hatch or the
   other.
 - Console access (your provider's web console, IPMI) bypasses sshd
-  entirely — keep it working.
+  entirely — keep it working. It is the recovery path above.
+- The installer reads sshd's own effective configuration and keeps the
+  way in that this machine actually uses: on a password box it adds a
+  PAM-only path (still gated), on a key-only box it requires the key.
+  Early versions always demanded a public key, which locked a real
+  password-only server out during testing.
 - Keep `timeoutSec` below sshd's `LoginGraceTime` (120s by default), or
   sshd hangs up before you have finished deciding.
 

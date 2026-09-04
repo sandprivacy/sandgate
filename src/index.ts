@@ -636,9 +636,13 @@ async function main(): Promise<void> {
       return cmdBiometric(args[0]);
     case "ssh-guard": {
       const { runSshGuard } = await import("./ssh-guard-cli.js");
+      // Read-only as far as the vault goes: `pair` only needs the relay
+      // URL, and generates a brand-new pairing of its own. Same quick
+      // unlock as `totp`, so a machine with `protect` set up is not
+      // prompted for a command that changes nothing.
       return runSshGuard(args[0], args[1], async () => {
         const prompter = new Prompter();
-        const pass = await getPassphrase(prompter);
+        const pass = await getPassphraseQuick(prompter);
         prompter.close();
         return pass;
       });

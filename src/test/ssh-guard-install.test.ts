@@ -4,6 +4,10 @@ import {
   patchPam,
   patchSshd,
   unpatch,
+  sshdDirectives,
+  passwordLoginPossible,
+  usesDropins,
+  conflictingPolicy,
   PAM_MARKER,
   SSHD_MARKER,
 } from "../ssh-guard-install.js";
@@ -67,4 +71,68 @@ test("uninstall on an untouched file changes nothing", () => {
   const result = unpatch(PAM_BEFORE, PAM_MARKER);
   assert.equal(result.changed, false);
   assert.equal(result.text, PAM_BEFORE);
+});
+
+test("a password-only machine keeps a way in", () => {
+  // Requiring publickey as the first factor, on a box where people log in
+  // with a password, locks everyone out the moment sshd reloads. This
+  // happened on a real server during testing; it must never happen again.
+  const withPassword = sshdDirectives(true);
+  assert.match(
+    withPassword,
+    /AuthenticationMethods publickey,keyboard-interactive:pam keyboard-interactive:pam/,
+    "password users need a PAM-only path — which still runs the hook"
+  );
+
+  const keysOnly = sshdDirectives(false);
+  assert.match(keysOnly, /AuthenticationMethods publickey,keyboard-interactive:pam\n/);
+  assert.ok(
+    !/pam keyboard-interactive/.test(keysOnly),
+    "a key-only machine must not gain a password path it did not have"
+  );
+});
+
+test("password availability is read from sshd's own effective settings", () => {
+  assert.equal(passwordLoginPossible(new Map([["passwordauthentication", "yes"]])), true);
+  assert.equal(
+    passwordLoginPossible(
+      new Map([
+        ["passwordauthentication", "no"],
+        ["kbdinteractiveauthentication", "yes"],
+      ])
+    ),
+    true
+  );
+  assert.equal(
+    passwordLoginPossible(
+      new Map([
+        ["passwordauthentication", "no"],
+        ["kbdinteractiveauthentication", "no"],
+      ])
+    ),
+    false
+  );
+  // Cannot tell? Assume a password is in use — the assumption that keeps
+  // people able to log in.
+  assert.equal(passwordLoginPossible(null), true);
+});
+
+test("our directives are prepended, because the first value wins", () => {
+  const result = patchSshd("Port 22\nKbdInteractiveAuthentication no\n");
+  assert.ok(
+    result.text.indexOf("KbdInteractiveAuthentication yes") <
+      result.text.indexOf("KbdInteractiveAuthentication no"),
+    "appending would silently lose to the distribution's own setting"
+  );
+});
+
+test("drop-in usage is detected from the Include directive", () => {
+  assert.equal(usesDropins("Include /etc/ssh/sshd_config.d/*.conf\nPort 22"), true);
+  assert.equal(usesDropins("Port 22\n"), false);
+});
+
+test("an existing policy is reported rather than trampled", () => {
+  assert.equal(conflictingPolicy("AuthenticationMethods publickey,password"), "publickey,password");
+  assert.equal(conflictingPolicy("AuthenticationMethods publickey,keyboard-interactive:pam"), null);
+  assert.equal(conflictingPolicy("Port 22"), null);
 });
