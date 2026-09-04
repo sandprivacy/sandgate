@@ -93,6 +93,31 @@ After `sandgate protect`, this doesn't even ask for the passphrase — the
 same OS-store lookup the MCP server uses. Read-only convenience;
 anything that changes state still asks.
 
+## From any script: `sandgate ask`
+
+```bash
+sandgate ask "Rotate the production DB password?" --body "Runs pg_rotate.sh" && ./pg_rotate.sh
+CODE=$(sandgate ask "SMS code from the bank?" --input)     # the typed answer, on stdout
+```
+
+Exit 0 approved, 1 refused, 2 no answer. The same phone, the same
+end-to-end channel, from cron, CI, or a shell one-liner.
+
+## Teams: several devices, or a Slack channel
+
+```bash
+sandgate add-device          # a second phone on the same pairing
+sandgate quorum 2            # two distinct devices must approve; one Deny refuses
+sandgate connect-slack xoxb-… xapp-… "#approvals" --approvers U0123,U0456
+sandgate channel slack       # send requests there instead of the phone
+```
+
+Slack requests are messages with Approve / Deny buttons (typed answers
+through a modal), settled in place so the channel keeps the record.
+Socket Mode, so no public URL. Slack does see the request text — that is
+what a shared channel is for, and why a personal secret still goes to
+the phone.
+
 ## Beyond agents: SSH logins that wait for your thumb
 
 ```bash
@@ -100,6 +125,9 @@ sandgate ssh-guard pair vps-prod         # on your workstation: prints one line
 sudo sandgate ssh-guard setup eyJ...     # on the server: that line, and you are done
 sandgate ssh-guard enforce --yes         # once verified, start blocking
 ```
+
+No Node on the server? Each release ships standalone Linux binaries
+(x64, arm64): one file under `/usr/local/bin`, same commands.
 
 An SSH login pauses until you approve it on your phone. Duo does this
 from their cloud, for a fee; ntfy plus a PAM script only *notifies* you
@@ -139,7 +167,11 @@ sandgate relay                    # serves the PWA + forwards sealed blobs (port
 sandgate pair https://your-relay  # prints a link + QR — open it on your phone
 ```
 
-How the trust works: the pairing secret travels once, inside the URL **fragment** (never sent to any server). Both ends derive an AES-256-GCM key (HKDF); every approval request and every tap is sealed with the request id bound into the AAD. The relay stores and forwards blobs it cannot read, and cannot forge — a malicious relay can at worst drop or delay an answer, which is just a deny. Push notifications wake the phone; if push is unavailable the PWA polls while open. A real phone needs the relay behind TLS (service workers require it); `http://localhost:8787` works for a desktop-browser test.
+How the trust works: the link carries a **one-time claim**, not the secret. The gateway seals the channel secret under the claim and parks it on the relay, which hands it out once and forgets it after ten minutes — the link is dead after use, and the secret itself only ever lives in the URL **fragment** on the phone, never on a server. Both ends derive an AES-256-GCM key (HKDF); every approval request and every tap is sealed with the request id bound into the AAD. The relay stores and forwards blobs it cannot read, and cannot forge — a malicious relay can at worst drop or delay an answer, which is just a deny. A real phone needs the relay behind TLS (service workers require it); `http://localhost:8787` works for a desktop-browser test.
+
+On the phone: scan the QR from inside the app ("+ add a vault" → *Scan a QR code*) or paste the link. Notifications show what is actually being asked — the sealed request rides inside the push, which is end-to-end encrypted, and the app decrypts it on the device — with Approve / Deny right on the lock screen for plain approvals (a switch in the app turns the details off). Several vaults (your laptop, your servers) live side by side under their own names.
+
+Housekeeping: `sandgate pairings` lists what is paired and whether the relay has seen it; `sandgate unpair` revokes the phone channel; `sandgate pair` again rotates it.
 
 Full threat model, including what it does *not* protect against and its
 known weaknesses: [SECURITY.md](SECURITY.md).
@@ -149,7 +181,8 @@ known weaknesses: [SECURITY.md](SECURITY.md).
 - MCP clients launch servers non-interactively, so the vault passphrase must come from the environment. `SANDGATE_PASSPHRASE` (the value, cleartext in your config) protects the vault *at rest* — a stolen `vault.enc` alone is useless. For more, `SANDGATE_PASSPHRASE_CMD` runs a command whose stdout is the passphrase, so it can live in your OS secret store: Windows DPAPI (`ConvertFrom-SecureString` once, decrypt in the command), macOS `security find-generic-password`, Linux `secret-tool lookup`, or any password manager CLI. Either way, a fully compromised machine defeats any local secret store — that threat class is out of scope for all of them.
 - Approval taps are only accepted from your own Telegram chat; anything else — including silence — is a deny. Agent-supplied text in approval messages is escaped and truncated.
 - Email content handled by `wait_for_verification` is untrusted third-party input. The tool description tells agents so; only the extracted code and hint-filtered links are returned, never the raw body.
-- Several agents can wait on you at once: approvals are served by a single dispatcher, first tap wins per request.
+- Several agents can wait on you at once: approvals are served by a single dispatcher, first tap wins per request — or the first quorum, if you set one.
+- The pairing link is a credential while it lives: ten minutes, one use. After that it is a 404. Someone who finds it inside the window and beats you to it holds the channel — your own claim then fails visibly, which is the cue to run `sandgate pair` again.
 
 ## Roadmap
 
@@ -160,7 +193,10 @@ known weaknesses: [SECURITY.md](SECURITY.md).
 - [x] OS keychain for the vault passphrase (`SANDGATE_PASSPHRASE_CMD`, `sandgate protect`)
 - [x] Face ID / Touch ID on approvals, verified server-side (`sandgate enroll-biometric`)
 - [x] Blocking SSH approval (`sandgate ssh-guard`)
-- [ ] Slack approval channel with multiple approvers (teams)
+- [x] Slack approval channel with multiple approvers (`sandgate connect-slack`, `sandgate quorum`)
+- [x] `sandgate ask` — the human step from any script
+- [x] One-time pairing links, revocation (`sandgate unpair`), QR scanning in the app, lock-screen approvals
+- [x] Standalone Linux binaries for servers; SELinux policy for RHEL-family systems
 - [ ] Team policies (shared vault, centralized audit)
 - [x] Framework guides: [Claude Code](docs/integrations/claude-code.md), [browser-use](docs/integrations/browser-use.md), [Playwright MCP](docs/integrations/playwright-mcp.md), [LangGraph](docs/integrations/langgraph.md)
 

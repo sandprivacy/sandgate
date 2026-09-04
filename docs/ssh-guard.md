@@ -32,9 +32,10 @@ phone app.
 sandgate ssh-guard pair vps-prod
 ```
 
-It prints a link and a QR for your phone (add it with "+ add a vault", so
-the server shows up under its own name), then the JSON config to install
-on the server.
+It prints a link and a QR for your phone (in the app: "+ add a vault",
+then *Scan a QR code* or paste — the link works once and expires in ten
+minutes), and the one line to run on the server. The workstation
+remembers the server, so `sandgate pairings` can list it later.
 
 **On the server — literally one command** (plus installing the package):
 
@@ -42,6 +43,17 @@ on the server.
 npm i -g @sandprivacy/sandgate
 sudo sandgate ssh-guard setup eyJyZWxheVVybCI6...   # the exact line `pair` printed
 ```
+
+Rather not put Node on a server? Each release ships a standalone binary:
+
+```bash
+curl -fsSL https://github.com/sandprivacy/sandgate/releases/latest/download/sandgate-linux-x64 -o /usr/local/bin/sandgate
+chmod +x /usr/local/bin/sandgate
+sudo sandgate ssh-guard setup eyJ...     # identical from here on
+```
+
+The installer writes the binary itself as the PAM hook — no interpreter,
+one file, `bin_t` under SELinux.
 
 `setup` decodes the pairing, writes `/etc/sandgate/ssh-guard.json` as
 root with mode 0600, then wires up PAM: it backs up `/etc/pam.d/sshd` and
@@ -112,12 +124,15 @@ included from the top of `sshd_config`, so the directives go in a
 drop-in read before everything else.
 
 **RHEL / Rocky / Alma 9** — same layout, so the drop-in path applies.
-Node comes from `dnf` or NodeSource rather than `apt`. **SELinux is the
-real obstacle**: `sshd_t` executing a Node binary and opening a network
-connection during authentication is exactly what the default policy is
-built to refuse, and denials surface as AVC messages in
-`/var/log/audit/audit.log`. Expect to write a small policy module before
-this works. Untested; treat it as a project, not a command.
+Node comes from `dnf` or NodeSource rather than `apt` — or use the
+standalone binary. **SELinux is the real obstacle**: `sshd_t` executing
+a binary and opening a network connection during authentication is
+exactly what the default policy is built to refuse, and denials surface
+as AVC messages in `/var/log/audit/audit.log`. The installer warns when
+`getenforce` says Enforcing; [deploy/selinux/](../deploy/selinux/)
+carries a policy module and the procedure. Untested on a real enforcing
+machine at the time of writing: treat it as a starting point, and send
+the denials you hit.
 
 **RHEL 8 and other older releases** — OpenSSH predating 8.2 has no
 `Include`, so there is no drop-in directory. The installer detects that

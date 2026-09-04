@@ -17,10 +17,24 @@ cannot read.
 - **Vault** — AES-256-GCM, key from scrypt (N=2¹⁵) over your passphrase.
   Holds TOTP seeds, API keys, pairings, the enrolled biometric public
   key. Decrypted in memory only.
-- **Channel** — the pairing secret travels once, in a URL *fragment*
-  (never sent to a server). Both ends derive one AES-256-GCM key with
-  HKDF-SHA256. Every message binds the request id in its AAD, so nothing
-  can be replayed onto another request.
+- **Channel** — the pairing link carries a one-time *claim*, not the
+  secret: the gateway seals the channel secret under it and parks the
+  blob on the relay, which hands it out once and drops it after ten
+  minutes. The secret then lives in a URL *fragment* on the phone, never
+  on a server. Both ends derive one AES-256-GCM key with HKDF-SHA256.
+  Every message binds the request id in its AAD, so nothing can be
+  replayed onto another request.
+- **Notifications** — the sealed request rides inside the Web Push
+  payload, which is itself end-to-end encrypted (RFC 8291): Apple and
+  Google relay bytes they cannot read. The service worker decrypts it on
+  the device to show the title, and can answer plain approvals from the
+  lock screen. Requests that require a biometric get no shortcut.
+- **Quorum** — with `sandgate quorum n`, the relay collects sealed
+  decisions and the gateway counts distinct devices (a random per-device
+  id inside each sealed decision). One Deny is final. The relay learns
+  the number `n` and nothing else.
+- **Slack** — a team channel: Slack sees the request text, by design.
+  Only listed approvers count; a quorum counts distinct Slack users.
 - **Biometrics (optional)** — a WebAuthn assertion from your phone's
   secure enclave, verified by the gateway: signature, relying party,
   challenge, origin and the user-verification flag. Enforcement lives in
@@ -36,7 +50,11 @@ cannot read.
 - **A stolen SSH key or password** (with `ssh-guard`): the attacker
   authenticates and still gets nowhere, and you find out immediately.
 - **Notification fatigue.** The relay caps requests per pairing so a
-  compromised gateway cannot bury your phone until you tap yes by reflex.
+  compromised gateway cannot bury your phone until you tap yes by reflex,
+  and calls per client address so invented pair ids cannot exhaust it.
+- **A pairing link found later.** After its one use, or ten minutes, it
+  is a 404. `sandgate unpair` revokes a channel outright; `sandgate pair`
+  rotates it; `sandgate pairings` shows what exists.
 - **Failure.** Silence, timeouts, unreadable answers, dropped
   connections and unknown domains all refuse. Refusing is the default
   everywhere; `ssh-guard` is the one place you can deliberately choose
@@ -57,6 +75,12 @@ cannot read.
 - **A root-compromised server** (for `ssh-guard`): at that point the
   attacker owns sshd, PAM and the guard alike.
 - **A stolen, unlocked phone**, unless you enable biometric approvals.
+- **A pairing link stolen inside its ten-minute window and used before
+  you.** Your own claim then fails, visibly: pair again. The window is
+  the residual risk, and it is minutes wide instead of forever.
+- **Whoever can read your lock screen**, if you keep notification
+  details on. The switch is in the app; off, the notification says only
+  that something is waiting.
 - **Relay outage.** With the defaults this means approvals fail, so
   agents stop and SSH refuses. That is safe, not available. `ssh-guard`
   offers `failOpen` and exempt users precisely because a server you
@@ -66,19 +90,25 @@ cannot read.
 
 Listed because you will find them anyway.
 
-1. **No external audit.** Written fast, tested hard (60+ tests, including
+1. **No external audit.** Written fast, tested hard (99 tests, including
    browser-level runs of the real page against a real relay and a
    simulated authenticator), reviewed by nobody but its author.
 2. **A leaked `pairId` lets someone hijack push delivery.** The relay is
    blind by design, so it cannot tell your phone from an impostor when
    registering a push subscription. The consequence is notification
    theft and denial — never approval, since the attacker has no key.
-   Re-pair to recover.
+   `sandgate pair` again to recover. The relay's `/api/metrics` shows
+   push failures rising if this happens at scale.
+2b. **The service worker keeps pairing secrets in the Cache API**, next to
+   localStorage — same origin, same device, same sandbox. Nothing new
+   is exposed, but it is one more place the secret lives on the phone.
 3. **One biometric credential**, with no revocation list. Enrolling a new
    device replaces the old one.
 4. **The relay is a single point of failure** for approvals.
-5. **`ssh-guard` needs Node on the server.** A standalone binary would
-   shrink that surface; it is on the roadmap.
+5. **`ssh-guard` on SELinux-enforcing systems needs a policy module**
+   (`deploy/selinux/`), not yet validated on a real machine. The
+   standalone binaries in each release remove Node from the server; the
+   PAM hook is then one file under `/usr/local/bin`.
 6. **The audit log is local and unsigned.** It records what was asked and
    decided, never codes, answers or secrets — but a root-compromised
    machine can rewrite it.
