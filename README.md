@@ -56,6 +56,24 @@ That's it. Your agent now has four new tools.
 
 **CAPTCHAs.** sandgate will never auto-solve a CAPTCHA — that's the point of a CAPTCHA. The pattern that works today, by composition: tell your agent that on hitting one it should call `request_approval("CAPTCHA on <site> — solve it at the computer, then approve to continue")`. Your phone buzzes, you solve it where the browser is, you tap approve, the agent resumes. Same behavior as OpenAI's Operator, plus the notification.
 
+## Face ID / Touch ID on sensitive approvals (optional)
+
+A tap proves someone holds your unlocked phone. A biometric assertion
+proves it was *you*, on the *enrolled* device — and the gateway verifies
+it cryptographically instead of trusting the page:
+
+```bash
+sandgate enroll-biometric    # your phone asks; Face ID confirms
+sandgate biometric on        # now every approval must be signed
+```
+
+Each approval carries a WebAuthn assertion over a challenge derived from
+the request id, signed inside your phone's secure enclave. sandgate
+stores only the public key and checks the signature, the relying party,
+the challenge and the user-verification flag. Anything off — a replayed
+assertion, another device, a missing biometric — is a denial, never an
+approval. Off by default; `sandgate status` tells you where you stand.
+
 ## Policies
 
 ```bash
@@ -101,7 +119,8 @@ How the trust works: the pairing secret travels once, inside the URL **fragment*
 - [x] `sandgate audit` — pretty-print the audit trail
 - [x] Mobile PWA with end-to-end-encrypted push (`sandgate relay` + `sandgate pair`), multi-vault, on-device history
 - [x] `ask_human` — free-text answers (SMS codes on your real number, security questions)
-- [ ] OS keychain for the vault passphrase
+- [x] OS keychain for the vault passphrase (`SANDGATE_PASSPHRASE_CMD`, `sandgate protect`)
+- [x] Face ID / Touch ID on approvals, verified server-side (`sandgate enroll-biometric`)
 - [ ] Slack approval channel with multiple approvers (teams)
 - [ ] Team policies (shared vault, centralized audit)
 - [x] Framework guides: [Claude Code](docs/integrations/claude-code.md), [browser-use](docs/integrations/browser-use.md), [Playwright MCP](docs/integrations/playwright-mcp.md), [LangGraph](docs/integrations/langgraph.md)

@@ -188,6 +188,7 @@
     <div class="sec">
       <div><h3>Zero disclosure</h3><p>The LLM only ever sees derived, short-lived values — a 6-digit code, a yes/no. Never seeds, tokens or passwords.</p></div>
       <div><h3>Deny by default</h3><p>Unknown domains refuse. Unanswered approvals refuse. A dropped connection refuses.</p></div>
+      <div><h3>Face ID, verified</h3><p>Optional: approvals carry a WebAuthn assertion from your phone’s secure enclave, checked against the enrolled key. Not a tap the page claims happened.</p></div>
       <div><h3>End-to-end encrypted</h3><p>The pairing secret travels once, in a URL fragment. HKDF → AES-256-GCM, request id bound into the AAD.</p></div>
       <div><h3>Self-hosted</h3><p>Vault, policies and audit live on your machine. Run your own relay, or use ours — it's blind either way.</p></div>
     </div>

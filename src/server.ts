@@ -28,9 +28,20 @@ export async function serve(passphrase: string): Promise<void> {
   const vault: VaultData = loadVault(passphrase);
   const config: Config = loadConfig();
 
+  if (config.requireBiometric && !vault.biometric) {
+    // Fail closed rather than silently downgrade to a plain tap.
+    throw new Error(
+      "requireBiometric is on but no credential is enrolled. Run `sandgate enroll-biometric`, or turn it off with `sandgate biometric off`."
+    );
+  }
+
   // PWA (E2EE push) wins over Telegram when both are configured.
   const approver: Approver | null = vault.pwa
-    ? new PwaApprover(vault.pwa)
+    ? new PwaApprover({
+        ...vault.pwa,
+        biometric: vault.biometric,
+        requireBiometric: config.requireBiometric,
+      })
     : vault.telegram
       ? new TelegramApprover(vault.telegram.botToken, vault.telegram.chatId)
       : null;

@@ -34,6 +34,8 @@ Usage:
   sandgate test-approval                 Send a test approval to your phone
   sandgate rekey                         Change the vault passphrase
   sandgate protect                       Store the passphrase in the OS store (Windows DPAPI)
+  sandgate enroll-biometric              Enroll Face ID / Touch ID on the paired phone
+  sandgate biometric <on|off>            Require a verified biometric for every approval
   sandgate status                        Show what is configured and active
   sandgate audit [n]                     Show the last n audit entries (default 20)
   sandgate serve                         Run the MCP server (stdio)
@@ -289,6 +291,47 @@ async function cmdProtect(): Promise<void> {
   );
 }
 
+async function cmdEnrollBiometric(): Promise<void> {
+  const prompter = new Prompter();
+  const pass = await getPassphrase(prompter);
+  prompter.close();
+  const data = loadVault(pass);
+  if (!data.pwa) {
+    console.error("Biometrics need the PWA channel. Run `sandgate pair <relay-url>` first.");
+    process.exit(1);
+  }
+  const { PwaApprover } = await import("./pwa-approver.js");
+  const approver = new PwaApprover(data.pwa);
+  console.log("Sent to your phone — tap Enable and confirm with Face ID / Touch ID (2 min)…");
+  const credential = await approver.enroll(120);
+  if (!credential) {
+    console.error("Not enrolled (declined or timed out).");
+    process.exit(1);
+  }
+  data.biometric = credential;
+  saveVault(pass, data);
+  console.log(
+    `Enrolled. sandgate stored only the public key (${credential.rpId}).
+` +
+      "Turn enforcement on with: sandgate biometric on"
+  );
+}
+
+async function cmdBiometric(mode?: string): Promise<void> {
+  if (mode !== "on" && mode !== "off") {
+    console.error("Usage: sandgate biometric <on|off>");
+    process.exit(1);
+  }
+  const config = loadConfig();
+  config.requireBiometric = mode === "on";
+  saveConfig(config);
+  console.log(
+    mode === "on"
+      ? "Biometric approvals required. Every approval must now be signed by the enrolled device."
+      : "Biometric requirement off. A tap is enough again."
+  );
+}
+
 async function cmdStatus(): Promise<void> {
   if (!vaultExists()) {
     console.log("No vault. Run `sandgate init` to get started.");
@@ -329,6 +372,17 @@ async function cmdStatus(): Promise<void> {
             .map(([d, p]) => `${d}=${p}`)
             .join(", ")
         : "")
+  );
+  console.log(
+    `  biometric          ${
+      config.requireBiometric
+        ? data.biometric
+          ? "required (enrolled)"
+          : "REQUIRED BUT NOT ENROLLED — run `sandgate enroll-biometric`"
+        : data.biometric
+          ? "enrolled, not enforced"
+          : "off"
+    }`
   );
   console.log(`  audit entries      ${auditCount}`);
 }
@@ -483,6 +537,10 @@ async function main(): Promise<void> {
       return cmdRekey();
     case "protect":
       return cmdProtect();
+    case "enroll-biometric":
+      return cmdEnrollBiometric();
+    case "biometric":
+      return cmdBiometric(args[0]);
     case "status":
       return cmdStatus();
     case "audit":

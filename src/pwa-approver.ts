@@ -1,6 +1,13 @@
 import { randomBytes } from "node:crypto";
 import type { Approver, ApprovalRequest, ApprovalResult, AskResult } from "./telegram.js";
 import { deriveKey, seal, open, aadForRequest, aadForDecision } from "./pwacrypto.js";
+import {
+  verifyAssertion,
+  verifyEnrollment,
+  type BiometricCredential,
+  type AssertionEvidence,
+  type EnrollmentEvidence,
+} from "./webauthn.js";
 
 /**
  * Approval channel backed by the paired phone PWA, through a relay that
@@ -16,6 +23,9 @@ export interface PwaConfig {
   relayUrl: string;
   pairId: string;
   secret: string;
+  /** When set, decisions must carry an assertion from this credential. */
+  biometric?: BiometricCredential;
+  requireBiometric?: boolean;
 }
 
 interface DecisionPayload {
@@ -23,6 +33,8 @@ interface DecisionPayload {
   approved: boolean;
   answer?: string;
   ts: number;
+  assertion?: AssertionEvidence;
+  enrollment?: EnrollmentEvidence;
 }
 
 export class PwaApprover implements Approver {
@@ -38,13 +50,24 @@ export class PwaApprover implements Approver {
 
   /** Post a sealed request and long-poll its sealed decision (or null on timeout). */
   private async roundTrip(
-    kind: "approval" | "input",
+    kind: "approval" | "input" | "enroll",
     req: ApprovalRequest
-  ): Promise<DecisionPayload | null> {
+  ): Promise<{ requestId: string; decision: DecisionPayload } | null> {
     const requestId = randomBytes(16).toString("base64url");
+    // Biometric enforcement travels inside the sealed request: the relay
+    // cannot see it, and the phone cannot be told to skip it by anyone else.
+    const needsBiometric = kind !== "enroll" && !!this.config.requireBiometric;
     const sealed = seal(
       this.key,
-      { kind, title: req.title, body: req.body, timeoutSec: req.timeoutSec, ts: Date.now() },
+      {
+        kind,
+        title: req.title,
+        body: req.body,
+        timeoutSec: req.timeoutSec,
+        ts: Date.now(),
+        requireBiometric: needsBiometric,
+        credentialId: needsBiometric ? this.config.biometric?.credentialId : undefined,
+      },
       aadForRequest(requestId)
     );
 
@@ -69,26 +92,59 @@ export class PwaApprover implements Approver {
       const { payload } = (await res.json()) as { payload: any };
       const decision = open<DecisionPayload>(this.key, payload, aadForDecision(requestId));
       if (decision.requestId !== requestId) continue; // belt and suspenders; AAD already binds it
-      return decision;
+      if (needsBiometric && decision.approved) {
+        // Fail closed: an approval without a verifiable assertion is not
+        // an approval. verifyAssertion throws on anything suspicious.
+        if (!this.config.biometric) {
+          throw new Error(
+            "Biometric approval is required but no credential is enrolled. Run `sandgate enroll-biometric`."
+          );
+        }
+        if (!decision.assertion) {
+          throw new Error("Approval arrived without the required biometric assertion.");
+        }
+        verifyAssertion(decision.assertion, this.config.biometric, requestId);
+      }
+      return { requestId, decision };
     }
     return null;
   }
 
   async request(req: ApprovalRequest): Promise<ApprovalResult> {
-    const decision = await this.roundTrip("approval", req);
-    if (!decision) return { approved: false, decision: "timeout" };
+    const result = await this.roundTrip("approval", req);
+    if (!result) return { approved: false, decision: "timeout" };
     return {
-      approved: decision.approved,
-      decision: decision.approved ? "approved" : "denied",
+      approved: result.decision.approved,
+      decision: result.decision.approved ? "approved" : "denied",
     };
   }
 
   async ask(req: ApprovalRequest): Promise<AskResult> {
-    const decision = await this.roundTrip("input", req);
-    if (!decision) return { answer: null, decision: "timeout" };
+    const result = await this.roundTrip("input", req);
+    if (!result) return { answer: null, decision: "timeout" };
+    const { decision } = result;
     if (!decision.approved || typeof decision.answer !== "string") {
       return { answer: null, decision: "denied" };
     }
     return { answer: decision.answer, decision: "answered" };
+  }
+
+  /**
+   * Enroll the phone's platform authenticator. Returns the credential to
+   * store in the vault, or null if the human declined or let it expire.
+   */
+  async enroll(timeoutSec: number): Promise<BiometricCredential | null> {
+    const result = await this.roundTrip("enroll", {
+      title: "Enable Face ID / Touch ID approvals",
+      body: "Your device will sign approvals from now on. sandgate stores only the public key.",
+      timeoutSec,
+    });
+    if (!result) return null;
+    const { requestId, decision } = result;
+    if (!decision.approved || !decision.enrollment) return null;
+    return verifyEnrollment(decision.enrollment, {
+      requestId,
+      origin: new URL(this.config.relayUrl).origin,
+    });
   }
 }

@@ -21,6 +21,12 @@ export interface Config {
     identityDefault: Policy;
   };
   approvalTimeoutSec: number;
+  /**
+   * Require a verified biometric assertion (Face ID / Touch ID on the
+   * paired phone) before any approval counts. Off by default: it needs
+   * an enrolled credential, and a tap is enough for most people.
+   */
+  requireBiometric: boolean;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -31,6 +37,7 @@ export const DEFAULT_CONFIG: Config = {
     identityDefault: "auto",
   },
   approvalTimeoutSec: 120,
+  requireBiometric: false,
 };
 
 export function loadConfig(): Config {

@@ -419,6 +419,69 @@ export const PWA_HTML = `<!doctype html>
     return { iv: bytesToB64u(iv), ct: bytesToB64u(ct) };
   }
 
+  // --- WebAuthn ceremonies (Face ID / Touch ID) ---------------------------
+  // The challenge is derived from the request id on both sides, so an
+  // assertion is worthless on any other request. sandgate only ever sees
+  // the public key: the private key never leaves the secure enclave.
+  async function webauthnChallenge(requestId) {
+    var digest = await crypto.subtle.digest(
+      "SHA-256",
+      enc.encode("sandgate-webauthn-v1:" + requestId)
+    );
+    return new Uint8Array(digest);
+  }
+
+  async function doEnroll(requestId) {
+    if (!window.PublicKeyCredential) throw new Error("this device has no passkey support");
+    var cred = await navigator.credentials.create({
+      publicKey: {
+        challenge: await webauthnChallenge(requestId),
+        rp: { id: location.hostname, name: "sandgate" },
+        user: {
+          id: crypto.getRandomValues(new Uint8Array(16)),
+          name: "sandgate",
+          displayName: "sandgate",
+        },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+        authenticatorSelection: {
+          authenticatorAttachment: "platform",
+          userVerification: "required",
+          residentKey: "discouraged",
+        },
+        attestation: "none",
+        timeout: 60000,
+      },
+    });
+    var spki = cred.response.getPublicKey && cred.response.getPublicKey();
+    if (!spki) throw new Error("this device did not expose the public key");
+    return {
+      credentialId: bytesToB64u(cred.rawId),
+      publicKeySpki: bytesToB64u(spki),
+      clientDataJSON: bytesToB64u(cred.response.clientDataJSON),
+    };
+  }
+
+  async function doAssert(requestId, credentialId) {
+    if (!window.PublicKeyCredential) throw new Error("this device has no passkey support");
+    var assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge: await webauthnChallenge(requestId),
+        rpId: location.hostname,
+        allowCredentials: credentialId
+          ? [{ type: "public-key", id: b64uToBytes(credentialId) }]
+          : undefined,
+        userVerification: "required",
+        timeout: 60000,
+      },
+    });
+    return {
+      credentialId: bytesToB64u(assertion.rawId),
+      authenticatorData: bytesToB64u(assertion.response.authenticatorData),
+      clientDataJSON: bytesToB64u(assertion.response.clientDataJSON),
+      signature: bytesToB64u(assertion.response.signature),
+    };
+  }
+
   // --- presence + push subscription ---------------------------------------
   // Announce this page to the relay immediately (push or not), so the
   // "sandgate pair" command can report "phone connected" without waiting
@@ -602,13 +665,20 @@ export const PWA_HTML = `<!doctype html>
 
   function addCard(id, p, requestId, req) {
     var isInput = req.kind === "input";
+    var isEnroll = req.kind === "enroll";
     var card = document.createElement("div");
     card.className = "card";
 
     var who = document.createElement("div"); who.className = "who";
     who.textContent =
       (pairs.length > 1 ? p.name + " · " : "") +
-      (isInput ? "agent · question" : "agent · approval request");
+      (isEnroll
+        ? "sandgate · setup"
+        : isInput
+          ? "agent · question"
+          : req.requireBiometric
+            ? "agent · approval · Face ID"
+            : "agent · approval request");
     card.appendChild(who);
     var h = document.createElement("h2"); h.textContent = req.title; card.appendChild(h);
     // NOTE: never name this variable p — var is function-scoped and would
@@ -616,7 +686,7 @@ export const PWA_HTML = `<!doctype html>
     if (req.body) { var bodyP = document.createElement("p"); bodyP.textContent = req.body; card.appendChild(bodyP); }
 
     var input = null;
-    if (isInput) {
+    if (isInput && !isEnroll) {
       input = document.createElement("input");
       input.className = "answer-input";
       input.placeholder = "Your answer";
@@ -632,7 +702,20 @@ export const PWA_HTML = `<!doctype html>
     card.appendChild(timer);
 
     var row = document.createElement("div"); row.className = "row";
-    if (isInput) {
+    if (isEnroll) {
+      row.appendChild(makeActionBtn("Enable", "ok", CHECK, function (btn) {
+        btn.disabled = true;
+        doEnroll(requestId).then(function (enrollment) {
+          submitDecision(id, { requestId: requestId, approved: true, ts: Date.now(), enrollment: enrollment }, "approved", btn);
+        }).catch(function (e) {
+          btn.disabled = false;
+          alert("Could not enable Face ID: " + (e && e.message ? e.message : e));
+        });
+      }));
+      row.appendChild(makeActionBtn("Not now", "no", CROSS, function (btn) {
+        submitDecision(id, { requestId: requestId, approved: false, ts: Date.now() }, "denied", btn);
+      }));
+    } else if (isInput) {
       var sendBtn = makeActionBtn("Send", "ok", CHECK, function (btn) {
         var value = input.value.trim();
         if (!value) { input.focus(); return; }
@@ -646,8 +729,18 @@ export const PWA_HTML = `<!doctype html>
         submitDecision(id, { requestId: requestId, approved: false, ts: Date.now() }, "denied", btn);
       }));
     } else {
-      row.appendChild(makeActionBtn("Approve", "ok", CHECK, function (btn) {
-        submitDecision(id, { requestId: requestId, approved: true, ts: Date.now() }, "approved", btn);
+      row.appendChild(makeActionBtn(req.requireBiometric ? "Approve with Face ID" : "Approve", "ok", CHECK, function (btn) {
+        if (!req.requireBiometric) {
+          submitDecision(id, { requestId: requestId, approved: true, ts: Date.now() }, "approved", btn);
+          return;
+        }
+        btn.disabled = true;
+        doAssert(requestId, req.credentialId).then(function (assertion) {
+          submitDecision(id, { requestId: requestId, approved: true, ts: Date.now(), assertion: assertion }, "approved", btn);
+        }).catch(function (e) {
+          btn.disabled = false;
+          alert("Face ID check failed, approval not sent: " + (e && e.message ? e.message : e));
+        });
       }));
       row.appendChild(makeActionBtn("Deny", "no", CROSS, function (btn) {
         submitDecision(id, { requestId: requestId, approved: false, ts: Date.now() }, "denied", btn);

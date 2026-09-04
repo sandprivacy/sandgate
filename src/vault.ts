@@ -5,6 +5,7 @@ import {
   createDecipheriv,
 } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import type { BiometricCredential } from "./webauthn.js";
 import { vaultPath } from "./paths.js";
 
 /**
@@ -38,6 +39,8 @@ export interface VaultData {
     pairId: string;
     secret: string;
   };
+  /** Platform authenticator enrolled on the paired phone (Face ID / Touch ID). */
+  biometric?: BiometricCredential;
 }
 
 const SCRYPT_OPTS = { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
