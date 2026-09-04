@@ -30,10 +30,20 @@ interface Pairing {
   listeners: Set<ServerResponse>;
   /** Last time a PWA page with this pairing said hello (push or not). */
   lastSeen?: number;
+  /** The one-time pairing blob, until a phone collects it or it expires. */
+  claim?: { payload: unknown; ts: number };
+  /** When a phone collected the claim — the pairing is spoken for. */
+  claimedAt?: number;
 }
 
 const MAX_BODY = 64 * 1024;
 const REQUEST_TTL_MS = 30 * 60 * 1000;
+/**
+ * A pairing link lives this long, then the sealed secret it points at is
+ * gone. Long enough to walk to your phone; short enough that a link in a
+ * chat log is worthless by the time anyone reads it.
+ */
+export const CLAIM_TTL_MS = 10 * 60 * 1000;
 
 /**
  * Per-pairing limits. Notification fatigue is a real attack: a
@@ -50,7 +60,10 @@ const MAX_LISTENERS = 8;
 export async function startRelay(opts: {
   port: number;
   stateDir: string;
+  /** Tests only: shorten the pairing-link lifetime. */
+  claimTtlMs?: number;
 }): Promise<{ close: () => void; port: number }> {
+  const claimTtl = opts.claimTtlMs ?? CLAIM_TTL_MS;
   mkdirSync(opts.stateDir, { recursive: true });
   const statePath = join(opts.stateDir, "relay-state.json");
 
@@ -94,12 +107,14 @@ export async function startRelay(opts: {
 
   const gc = setInterval(() => {
     const cutoff = Date.now() - REQUEST_TTL_MS;
+    const claimCutoff = Date.now() - claimTtl;
     for (const p of pairings.values()) {
       for (const [id, entry] of p.requests) {
         if (entry.ts < cutoff) p.requests.delete(id);
       }
+      if (p.claim && p.claim.ts < claimCutoff) p.claim = undefined;
     }
-  }, 60_000);
+  }, Math.min(60_000, claimTtl));
   gc.unref();
 
   function json(res: ServerResponse, status: number, body: unknown): void {
@@ -206,10 +221,40 @@ export async function startRelay(opts: {
         const pairId = url.searchParams.get("pairId") ?? "";
         if (!validId(pairId)) return json(res, 400, { error: "bad pairId" });
         const pairing = getPairing(pairId);
+        const claimLive = !!pairing.claim && Date.now() - pairing.claim.ts < claimTtl;
         return json(res, 200, {
           subscribed: !!pairing.subscription,
           seen: !!pairing.lastSeen || !!pairing.subscription,
+          claimed: !!pairing.claimedAt,
+          claimPending: claimLive,
         });
+      }
+
+      // --- one-time pairing claims: the relay parks a sealed blob it cannot
+      // read, hands it out once, and forgets it. See pwacrypto.ts.
+      if (req.method === "POST" && url.pathname === "/api/claim") {
+        const body = await readBody(req);
+        if (!validId(body.pairId) || !body.payload) {
+          return json(res, 400, { error: "pairId and payload required" });
+        }
+        const pairing = getPairing(body.pairId);
+        pairing.claim = { payload: body.payload, ts: Date.now() };
+        return json(res, 200, { ok: true });
+      }
+      if (req.method === "GET" && url.pathname === "/api/claim") {
+        const pairId = url.searchParams.get("pairId") ?? "";
+        if (!validId(pairId)) return json(res, 400, { error: "bad pairId" });
+        const pairing = getPairing(pairId);
+        const live = pairing.claim && Date.now() - pairing.claim.ts < claimTtl;
+        if (!live) {
+          pairing.claim = undefined;
+          return json(res, 404, { error: "no pairing to claim: the link expired or was already used" });
+        }
+        // Single use: whoever reads it first has it, and nobody after.
+        const payload = pairing.claim!.payload;
+        pairing.claim = undefined;
+        pairing.claimedAt = Date.now();
+        return json(res, 200, { payload });
       }
 
       if (req.method === "POST" && url.pathname === "/api/request") {

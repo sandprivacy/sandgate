@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { loadVault } from "./vault.js";
+import { loadVault, saveVault } from "./vault.js";
 import { audit } from "./audit.js";
 import {
   configPathFromEnv,
@@ -103,12 +103,15 @@ async function pair(
   askPassphrase: AskPassphrase,
   configPath: string
 ): Promise<void> {
-  const data = loadVault(await askPassphrase());
+  const pass = await askPassphrase();
+  const data = loadVault(pass);
   if (!data.pwa) {
     console.error("Pair your phone first: sandgate pair <relay-url>");
     process.exit(1);
   }
-  const { newPairing } = await import("./pwacrypto.js");
+  const { newPairing, newClaimSecret, sealClaim, publishClaim, pairingLink } = await import(
+    "./pwacrypto.js"
+  );
   const pairing = newPairing();
   const serverName = name || "server";
   const relayUrl = data.pwa!.relayUrl.replace(/\/$/, "");
@@ -123,8 +126,21 @@ async function pair(
     // to lock anyone out. `ssh-guard enforce` is the deliberate step.
     failOpen: true,
   };
-  const link = `${relayUrl}/#p=${pairing.pairId}&s=${pairing.secret}`;
+
+  // The phone gets a one-time claim on the secret, never the secret itself;
+  // the server gets the secret directly, in the blob below.
+  const claim = newClaimSecret();
+  await publishClaim(relayUrl, pairing.pairId, sealClaim(claim, pairing.pairId, { secret: pairing.secret, name: serverName }));
+  const link = pairingLink(relayUrl, pairing.pairId, claim, serverName);
   const qrcode = (await import("qrcode-terminal")).default;
+
+  // Remember which servers this workstation paired, so `sandgate pairings`
+  // can list them. No secret is kept here: the server holds it.
+  data.sshGuards = [
+    ...(data.sshGuards ?? []).filter((s) => s.serverName !== serverName),
+    { serverName, pairId: pairing.pairId, createdAt: new Date().toISOString() },
+  ];
+  saveVault(pass, data);
 
   console.log(
     [
@@ -132,7 +148,8 @@ async function pair(
       "revoking this one server later is a single line removed on the phone,",
       "and the server never holds your vault — only the right to ask.",
       "",
-      '1. Add it to your phone: open this link there, or scan it, then "+ add a vault".',
+      '1. On your phone, in the sandgate app: "+ add a vault", then scan this or paste the link.',
+      "   The link works ONCE and expires in 10 minutes.",
       "",
       `  ${link}`,
       "",

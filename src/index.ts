@@ -23,7 +23,7 @@ import {
 } from "./vault.js";
 import { loadConfig, saveConfig, biometricRequired, type Policy } from "./config.js";
 import { normalizeSecret, generateCode } from "./totp.js";
-import { TelegramApprover, discoverChatId } from "./telegram.js";
+import { TelegramApprover, discoverChatId, type Approver } from "./telegram.js";
 import { serve } from "./server.js";
 import { sandgateDir } from "./paths.js";
 
@@ -37,6 +37,11 @@ Usage:
   sandgate connect-telegram <bot-token>  Connect (or fix) the Telegram approval channel
   sandgate relay [port]                  Run the approval relay (serves the phone PWA)
   sandgate pair <relay-url>              Pair your phone via the relay (E2EE, replaces Telegram)
+  sandgate add-device                    Add another phone to the current pairing
+  sandgate unpair                        Revoke the phone channel entirely
+  sandgate pairings                      List what is paired (phone, ssh-guard servers) and its state
+  sandgate quorum <n>                    Require n distinct devices to approve
+  sandgate ask "<title>" [--input]       The human step from any script (exit 0/1/2)
   sandgate connect-sandmail <api-key>    Connect the sandmail inbox backend
   sandgate connect-imap                  Connect your own IMAP mailbox instead (self-hosted)
   sandgate test-approval                 Send a test approval to your phone
@@ -514,6 +519,70 @@ async function cmdRelay(portArg?: string): Promise<void> {
   );
 }
 
+/**
+ * Print a one-time pairing link (and its QR) for the channel secret. The
+ * link carries a claim, not the secret: the relay hands the sealed secret
+ * out once, then it is gone. See pwacrypto.ts.
+ */
+async function offerPairingLink(
+  relayUrl: string,
+  pairId: string,
+  secret: string,
+  name: string
+): Promise<void> {
+  const { newClaimSecret, sealClaim, publishClaim, pairingLink } = await import("./pwacrypto.js");
+  const claim = newClaimSecret();
+  await publishClaim(relayUrl, pairId, sealClaim(claim, pairId, { secret, name }));
+  const link = pairingLink(relayUrl, pairId, claim, name);
+  const qrcode = (await import("qrcode-terminal")).default;
+  console.log(
+    '\nOpen this link on your phone — in the sandgate app if it is installed ("+ add a vault" → scan or paste):\n'
+  );
+  console.log(`  ${link}\n`);
+  qrcode.generate(link, { small: true });
+  console.log("\nThe link works ONCE and expires in 10 minutes. It carries a claim, not the secret.");
+}
+
+/** Wait for the phone: claimed first, then (ideally) subscribed to push. */
+async function waitForPhone(relayUrl: string, pairId: string, seconds = 120): Promise<void> {
+  const deadline = Date.now() + seconds * 1000;
+  let claimedAnnounced = false;
+  let seenAnnounced = false;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${relayUrl}/api/pair-status?pairId=${encodeURIComponent(pairId)}`);
+      const status = (await res.json()) as {
+        subscribed: boolean;
+        seen?: boolean;
+        claimed?: boolean;
+        claimPending?: boolean;
+      };
+      if (status.claimed && !claimedAnnounced) {
+        claimedAnnounced = true;
+        console.log("Phone collected the pairing — that link is now dead.");
+      }
+      if (status.subscribed) {
+        console.log("Paired, push notifications on. Try: sandgate test-approval");
+        return;
+      }
+      if (status.seen && !seenAnnounced) {
+        seenAnnounced = true;
+        console.log(
+          'Phone connected. For notifications with the app closed, tap "Enable notifications" in the app (on iPhone: install to home screen first)…'
+        );
+      }
+    } catch {
+      /* relay hiccup: keep waiting */
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  console.log(
+    claimedAnnounced
+      ? 'Paired. Notifications are not on yet: open the app and tap "Enable notifications".'
+      : "No phone showed up. The link has expired or will shortly; run `sandgate pair` again when you are ready."
+  );
+}
+
 async function cmdPair(relayUrl?: string): Promise<void> {
   if (!relayUrl) {
     console.error(
@@ -530,47 +599,187 @@ async function cmdPair(relayUrl?: string): Promise<void> {
   const { newPairing } = await import("./pwacrypto.js");
   const pairing = newPairing();
   const base = relayUrl.replace(/\/$/, "");
-  const pairLink = `${base}/#p=${pairing.pairId}&s=${pairing.secret}`;
-
-  data.pwa = { relayUrl: base, pairId: pairing.pairId, secret: pairing.secret };
+  if (data.pwa) {
+    console.log(
+      "Replacing the existing pairing: every device that had the old one stops receiving anything.\n" +
+        "(To add a second device to the CURRENT pairing, use `sandgate add-device` instead.)"
+    );
+  }
+  data.pwa = { relayUrl: base, pairId: pairing.pairId, secret: pairing.secret, quorum: data.pwa?.quorum };
   saveVault(pass, data);
 
-  const qrcode = (await import("qrcode-terminal")).default;
-  console.log("\nOpen this link on your phone (the secret is in the URL fragment — it never reaches the relay):\n");
-  console.log(`  ${pairLink}\n`);
-  qrcode.generate(pairLink, { small: true });
-  console.log("\nWaiting for the phone to subscribe (2 min)…");
+  const { hostname } = await import("node:os");
+  await offerPairingLink(base, pairing.pairId, pairing.secret, hostname());
+  console.log("\nWaiting for the phone (2 min)…");
+  await waitForPhone(base, pairing.pairId);
+}
 
-  const deadline = Date.now() + 120_000;
-  let seenAnnounced = false;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(
-        `${base}/api/pair-status?pairId=${encodeURIComponent(pairing.pairId)}`
-      );
-      const status = (await res.json()) as { subscribed: boolean; seen?: boolean };
-      if (status.subscribed) {
-        console.log(
-          "Paired, push notifications on. The PWA now takes over approvals (Telegram becomes the fallback). Try: sandgate test-approval"
-        );
-        return;
-      }
-      if (status.seen && !seenAnnounced) {
-        seenAnnounced = true;
-        console.log(
-          'Phone connected. For notifications with the app closed, tap "Enable notifications" in the app (on iPhone: install to home screen first)…'
-        );
-      }
-    } catch {
-      // relay not reachable yet; keep trying
-    }
-    await new Promise((r) => setTimeout(r, 3000));
+/** A second phone (or a replacement) on the same pairing, without rotating it. */
+async function cmdAddDevice(): Promise<void> {
+  const prompter = new Prompter();
+  const pass = await getPassphraseQuick(prompter);
+  prompter.close();
+  const data = loadVault(pass);
+  if (!data.pwa) {
+    console.error("Nothing to add a device to: run `sandgate pair <relay-url>` first.");
+    process.exit(1);
   }
+  const { hostname } = await import("node:os");
+  await offerPairingLink(data.pwa.relayUrl, data.pwa.pairId, data.pwa.secret, hostname());
+  console.log("\nWaiting for the new device (2 min)…");
+  await waitForPhone(data.pwa.relayUrl, data.pwa.pairId);
+}
+
+/** Revoke the phone channel: nothing is ever posted to that pairing again. */
+async function cmdUnpair(): Promise<void> {
+  const prompter = new Prompter();
+  const pass = await getPassphrase(prompter);
+  prompter.close();
+  const data = loadVault(pass);
+  if (!data.pwa) {
+    console.log("No phone is paired.");
+    return;
+  }
+  const { pairId } = data.pwa;
+  delete data.pwa;
+  saveVault(pass, data);
+  audit({ tool: "cli", action: "unpair", decision: "auto", detail: pairId });
   console.log(
-    seenAnnounced
-      ? "Paired (no push yet — the app works while open; enable notifications in it when you can)."
-      : "No phone yet — the pairing is saved anyway. Open the link on the phone, then check with: sandgate test-approval"
+    `Unpaired (${pairId}). Every device holding that pairing is cut off: the gateway will never\n` +
+      "post to it again. Approvals now fall back to Telegram if configured, otherwise refuse.\n" +
+      "Pair again with: sandgate pair <relay-url>"
   );
+}
+
+/** What is paired, and whether each pairing looks alive on the relay. */
+async function cmdPairings(): Promise<void> {
+  const prompter = new Prompter();
+  const pass = await getPassphraseQuick(prompter);
+  prompter.close();
+  const data = loadVault(pass);
+  const status = async (relayUrl: string, pairId: string): Promise<string> => {
+    try {
+      const res = await fetch(`${relayUrl}/api/pair-status?pairId=${encodeURIComponent(pairId)}`, {
+        signal: AbortSignal.timeout(8000),
+      });
+      const st = (await res.json()) as {
+        subscribed: boolean;
+        seen: boolean;
+        claimed?: boolean;
+        claimPending?: boolean;
+      };
+      if (st.claimPending) return "link issued, not collected yet";
+      if (st.subscribed) return "phone subscribed to push";
+      if (st.seen) return "phone seen (no push)";
+      return "never seen by the relay";
+    } catch {
+      return "relay unreachable";
+    }
+  };
+  if (data.pwa) {
+    console.log(`phone   ${data.pwa.pairId}  ${data.pwa.relayUrl}`);
+    console.log(`        quorum ${data.pwa.quorum ?? 1}, ${await status(data.pwa.relayUrl, data.pwa.pairId)}`);
+  } else {
+    console.log("phone   not paired");
+  }
+  const servers = data.sshGuards ?? [];
+  if (servers.length) {
+    console.log(
+      "\nssh-guard servers (each holds its own secret; revoke on the phone or with `ssh-guard uninstall` on the server):"
+    );
+    for (const srv of servers) {
+      const relay = data.pwa?.relayUrl;
+      const line = relay ? await status(relay, srv.pairId) : "no relay configured";
+      console.log(`  ${srv.serverName.padEnd(18)} ${srv.pairId}  since ${srv.createdAt.slice(0, 10)}  ${line}`);
+    }
+  }
+}
+
+/** How many devices must approve. Costs the passphrase: it changes what every approval means. */
+async function cmdQuorum(value?: string): Promise<void> {
+  const n = parseInt(value ?? "", 10);
+  if (!Number.isInteger(n) || n < 1 || n > 10) {
+    console.error("Usage: sandgate quorum <1-10>   (distinct devices that must approve each request)");
+    process.exit(1);
+  }
+  const prompter = new Prompter();
+  const pass = await getPassphrase(prompter);
+  prompter.close();
+  const data = loadVault(pass);
+  if (!data.pwa) {
+    console.error("Pair a phone first: sandgate pair <relay-url>");
+    process.exit(1);
+  }
+  data.pwa.quorum = n;
+  saveVault(pass, data);
+  console.log(
+    n === 1
+      ? "Quorum 1: any paired device approves."
+      : `Quorum ${n}: ${n} distinct devices must approve; a single Deny refuses. Add devices with: sandgate add-device`
+  );
+}
+
+/**
+ * The human step from any script: exit 0 approved, 1 refused, 2 no answer.
+ * With --input, the typed answer is the only thing on stdout.
+ */
+async function cmdAsk(args: string[]): Promise<void> {
+  const flags: Record<string, string | boolean> = {};
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--input") flags.input = true;
+    else if (a === "--body" || a === "--timeout") flags[a.slice(2)] = args[++i] ?? "";
+    else positional.push(a);
+  }
+  const title = positional.join(" ").trim();
+  if (!title) {
+    console.error(
+      'Usage: sandgate ask "<title>" [--body "<details>"] [--timeout <sec>] [--input]\n' +
+        "  exit 0 approved / answered, 1 refused, 2 no answer or error\n" +
+        "  --input prints the human's typed answer on stdout"
+    );
+    process.exit(2);
+  }
+  const prompter = new Prompter();
+  const pass = await getPassphraseQuick(prompter);
+  prompter.close();
+  const vault = loadVault(pass);
+  const config = loadConfig();
+  const { pwaApproverFrom } = await import("./pwa-approver.js");
+  const approver: Approver | null =
+    pwaApproverFrom(vault, config) ??
+    (vault.telegram ? new TelegramApprover(vault.telegram.botToken, vault.telegram.chatId) : null);
+  if (!approver) {
+    console.error("No approval channel: run `sandgate pair <relay-url>` (or connect Telegram).");
+    process.exit(2);
+  }
+  const timeoutSec = parseInt(String(flags.timeout ?? ""), 10) || config.approvalTimeoutSec;
+  const req = { title, body: typeof flags.body === "string" ? flags.body : undefined, timeoutSec };
+  const outcome = (d: string) => (d === "approved" || d === "answered" ? "approved" : d === "denied" ? "denied" : "timeout");
+  try {
+    if (flags.input) {
+      if (!approver.ask) {
+        console.error("This approval channel cannot collect typed answers.");
+        process.exit(2);
+      }
+      const result = await approver.ask(req);
+      audit({ tool: "cli", action: `ask: ${title}`, decision: outcome(result.decision) });
+      if (result.decision === "answered") {
+        process.stdout.write(result.answer + "\n");
+        process.exit(0);
+      }
+      console.error(result.decision === "denied" ? "refused" : "no answer");
+      process.exit(result.decision === "denied" ? 1 : 2);
+    }
+    const result = await approver.request(req);
+    audit({ tool: "cli", action: `ask: ${title}`, decision: outcome(result.decision) });
+    console.error(result.decision);
+    process.exit(result.approved ? 0 : result.decision === "denied" ? 1 : 2);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(2);
+  }
 }
 
 async function cmdTestApproval(): Promise<void> {
@@ -626,6 +835,16 @@ async function main(): Promise<void> {
       return cmdRelay(args[0]);
     case "pair":
       return cmdPair(args[0]);
+    case "add-device":
+      return cmdAddDevice();
+    case "unpair":
+      return cmdUnpair();
+    case "pairings":
+      return cmdPairings();
+    case "quorum":
+      return cmdQuorum(args[0]);
+    case "ask":
+      return cmdAsk(args);
     case "rekey":
       return cmdRekey();
     case "protect":

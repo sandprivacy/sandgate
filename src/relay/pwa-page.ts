@@ -279,9 +279,18 @@ export const PWA_HTML = `<!doctype html>
   var isAndroid = /Android/.test(navigator.userAgent);
 
   // --- pairing -------------------------------------------------------------
+  // Two link shapes. "c=" is a one-time claim: the channel secret is
+  // collected from the relay exactly once, so the link dies after use.
+  // "s=" carries the secret itself — older gateways, kept working.
   function parsePairing(text) {
-    var mm = String(text).match(/p=([A-Za-z0-9_-]{8,64})&s=([A-Za-z0-9_-]{8,})/);
-    return mm ? { pairId: mm[1], secret: mm[2] } : null;
+    var str = String(text);
+    var mm = str.match(/p=([A-Za-z0-9_-]{8,64})&(s|c)=([A-Za-z0-9_-]{8,})/);
+    if (!mm) return null;
+    var out = { pairId: mm[1] };
+    if (mm[2] === "c") out.claim = mm[3]; else out.secret = mm[3];
+    var nm = str.match(/[&#]n=([^&]+)/);
+    if (nm) { try { out.name = decodeURIComponent(nm[1]).slice(0, 40); } catch (e) {} }
+    return out;
   }
   // Several vaults can pair with this device (your laptop, your server…):
   // pairings are a list, requests from all of them show together.
@@ -311,12 +320,52 @@ export const PWA_HTML = `<!doctype html>
     for (var i = 0; i < pairs.length; i++) {
       if (pairs[i].pairId === parsed.pairId) return false;
     }
-    pairs.push({ name: "Vault " + (pairs.length + 1), pairId: parsed.pairId, secret: parsed.secret });
+    pairs.push({
+      name: parsed.name || ("Vault " + (pairs.length + 1)),
+      pairId: parsed.pairId,
+      secret: parsed.secret,
+    });
     savePairs();
     return true;
   }
-
+  /** Collect the channel secret behind a one-time claim link. */
+  async function resolveClaim(parsed) {
+    var res = await fetch("/api/claim?pairId=" + encodeURIComponent(parsed.pairId));
+    if (res.status === 404) throw new Error("This pairing link has expired or was already used. Run sandgate pair again.");
+    if (!res.ok) throw new Error("relay answered HTTP " + res.status);
+    var sealed = (await res.json()).payload;
+    var key = await deriveKeyFrom(parsed.claim, "pairing-claim");
+    var plain = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: b64uToBytes(sealed.iv), additionalData: enc.encode("claim:" + parsed.pairId) },
+      key, b64uToBytes(sealed.ct)
+    );
+    var payload = JSON.parse(dec.decode(plain));
+    return { pairId: parsed.pairId, secret: payload.secret, name: parsed.name || payload.name };
+  }
+  /** Any text that might be a pairing link: pasted, scanned, or from the URL. */
+  async function acceptPairingText(text) {
+    var parsed = parsePairing(text);
+    if (!parsed) return false;
+    if (parsed.claim) parsed = await resolveClaim(parsed);
+    return addPairing(parsed);
+  }
+  window.sandgate = { acceptPairingText: acceptPairingText, parsePairing: parsePairing };
   var candidate = parsePairing(location.hash);
+  if (candidate && candidate.claim) {
+    // A claim needs the network: collect it, then start over paired.
+    setStatus("pairing", "warn");
+    acceptPairingText(location.hash).then(function () {
+      location.replace(location.pathname);
+    }).catch(function (err) {
+      setStatus("not paired", "err");
+      var box = document.createElement("div");
+      box.className = "setup";
+      box.innerHTML = '<div class="mark">' + GLYPH + '</div><p></p>';
+      box.querySelector("p").textContent = err && err.message ? err.message : String(err);
+      listEl.appendChild(box);
+    });
+    return;
+  }
   if (candidate) {
     addPairing(candidate);
     // iOS Safari (not installed): KEEP the pairing link in the address bar.
@@ -339,11 +388,10 @@ export const PWA_HTML = `<!doctype html>
       '<input id="pasteLink" placeholder="https://relay…/#p=…&s=…" autocomplete="off">';
     listEl.appendChild(setup);
     document.getElementById("pasteLink").addEventListener("input", function (e) {
-      var parsed = parsePairing(e.target.value);
-      if (parsed) {
-        addPairing(parsed);
-        location.replace(location.pathname);
-      }
+      if (!parsePairing(e.target.value)) return;
+      acceptPairingText(e.target.value).then(function (added) {
+        if (added) location.replace(location.pathname);
+      }).catch(function (err) { alert(err && err.message ? err.message : err); });
     });
     return;
   }
@@ -383,22 +431,17 @@ export const PWA_HTML = `<!doctype html>
 
   // --- crypto (mirror of pwacrypto.ts), one derived key per vault ----------
   var keyCache = {};
+  async function deriveKeyFrom(secretB64u, info) {
+    var raw = await crypto.subtle.importKey("raw", b64uToBytes(secretB64u), "HKDF", false, ["deriveKey"]);
+    return crypto.subtle.deriveKey(
+      { name: "HKDF", hash: "SHA-256", salt: enc.encode("sandgate-pwa-v1"), info: enc.encode(info) },
+      raw, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
+    );
+  }
   function keyFor(p) {
-    if (!keyCache[p.pairId]) {
-      keyCache[p.pairId] = (async function () {
-        var raw = await crypto.subtle.importKey("raw", b64uToBytes(p.secret), "HKDF", false, ["deriveKey"]);
-        return crypto.subtle.deriveKey(
-          { name: "HKDF", hash: "SHA-256", salt: enc.encode("sandgate-pwa-v1"), info: enc.encode("approval-channel") },
-          raw,
-          { name: "AES-GCM", length: 256 },
-          false,
-          ["encrypt", "decrypt"]
-        );
-      })();
-    }
+    if (!keyCache[p.pairId]) keyCache[p.pairId] = deriveKeyFrom(p.secret, "approval-channel");
     return keyCache[p.pairId];
   }
-
   async function openSealed(p, sealed, aad) {
     var key = await keyFor(p);
     var pt = await crypto.subtle.decrypt(
@@ -888,6 +931,12 @@ export const PWA_HTML = `<!doctype html>
     pairs.forEach(function (p, idx) {
       var row = document.createElement("div"); row.className = "hrow";
       var t = document.createElement("span"); t.className = "t"; t.textContent = p.name;
+      t.style.cursor = "pointer";
+      t.title = "Rename";
+      t.onclick = function () {
+        var next = prompt("Name for this vault", p.name);
+        if (next && next.trim()) { p.name = next.trim().slice(0, 40); savePairs(); renderVaults(); }
+      };
       var x = document.createElement("span"); x.className = "d denied"; x.textContent = "remove";
       x.style.cursor = "pointer";
       x.onclick = function () {
@@ -910,8 +959,10 @@ export const PWA_HTML = `<!doctype html>
       input.autocomplete = "off";
       input.style.cssText = "width:100%;padding:10px 12px;margin-top:8px;background:var(--panel);border:1px solid var(--line);border-radius:8px;color:var(--ink);font:16px ui-monospace,monospace;box-sizing:border-box;";
       input.addEventListener("input", function (e) {
-        var parsed = parsePairing(e.target.value);
-        if (parsed && addPairing(parsed)) location.reload();
+        if (!parsePairing(e.target.value)) return;
+        acceptPairingText(e.target.value).then(function (added) {
+          if (added) location.reload();
+        }).catch(function (err) { alert(err && err.message ? err.message : err); });
       });
       section.appendChild(input);
       input.focus();

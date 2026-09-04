@@ -38,7 +38,14 @@ export interface VaultData {
     relayUrl: string;
     pairId: string;
     secret: string;
+    /** How many distinct devices must approve (default 1). */
+    quorum?: number;
   };
+  /**
+   * Servers this workstation paired for ssh-guard. Informational: each
+   * server holds its own secret; this is the list you revoke from.
+   */
+  sshGuards?: { serverName: string; pairId: string; createdAt: string }[];
   /** Platform authenticator enrolled on the paired phone (Face ID / Touch ID). */
   biometric?: BiometricCredential;
   /**

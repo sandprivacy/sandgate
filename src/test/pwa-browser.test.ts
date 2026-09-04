@@ -240,3 +240,48 @@ test("a vault added later is registered for push as well", async () => {
     relay.close();
   }
 });
+
+test("a one-time pairing link pairs once, names the vault, then dies", async () => {
+  const relay = await startRelay({
+    port: 0,
+    stateDir: mkdtempSync(join(tmpdir(), "sandgate-relay-")),
+  });
+  const relayUrl = `http://localhost:${relay.port}`;
+  try {
+    const { newClaimSecret, sealClaim, publishClaim, pairingLink } = await import("../pwacrypto.js");
+    const pairing = newPairing();
+    const claim = newClaimSecret();
+    await publishClaim(relayUrl, pairing.pairId, sealClaim(claim, pairing.pairId, { secret: pairing.secret, name: "vps-prod" }));
+    const link = pairingLink(relayUrl, pairing.pairId, claim, "vps-prod");
+    const hash = link.slice(link.indexOf("#"));
+
+    // First open: the phone collects the channel secret and remembers
+    // the vault under the name the gateway gave it.
+    const first = await loadPage(relayUrl, { hash });
+    try {
+      const stored = await waitFor(() => {
+        const raw = first.window.localStorage.getItem("sandgate_pairs");
+        return raw ? (JSON.parse(raw) as { name: string; pairId: string; secret: string }[]) : null;
+      });
+      assert.deepEqual(stored, [{ name: "vps-prod", pairId: pairing.pairId, secret: pairing.secret }]);
+      assert.ok(!first.window.location.hash.includes(pairing.secret), "the secret never appears in a URL");
+    } finally {
+      first.close();
+    }
+
+    // Same link, found later by someone else: nothing to collect.
+    const second = await loadPage(relayUrl, { hash });
+    try {
+      const message = await waitFor(() => {
+        const p = second.window.document.querySelector(".setup p");
+        return p && /expired or was already used/.test(p.textContent) ? p : null;
+      });
+      assert.ok(message);
+      assert.equal(second.window.localStorage.getItem("sandgate_pairs"), null, "no vault must be added");
+    } finally {
+      second.close();
+    }
+  } finally {
+    relay.close();
+  }
+});
