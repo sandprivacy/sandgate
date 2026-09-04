@@ -22,12 +22,16 @@ import {
 const PAM_BEFORE = ["#%PAM-1.0", "auth       substack     password-auth", "account    required     pam_nologin.so", ""].join("\n");
 
 test("the pam hook is appended once, and only once", () => {
-  const first = patchPam(PAM_BEFORE, "/usr/bin/sandgate");
+  const command = "/usr/bin/node /usr/local/lib/sandgate/index.js ssh-guard approve";
+  const first = patchPam(PAM_BEFORE, command);
   assert.equal(first.changed, true);
-  assert.match(first.text, /pam_exec\.so quiet \/usr\/bin\/sandgate ssh-guard approve/);
+  // The COMPLETE command line, written once: building the arguments here
+  // as well is how it once said "ssh-guard approve ssh-guard approve".
+  assert.ok(first.text.includes(`pam_exec.so quiet ${command}`));
+  assert.equal(first.text.split("ssh-guard approve").length - 1, 1, "arguments must not be doubled");
   assert.ok(first.text.startsWith(PAM_BEFORE.trimEnd()), "existing rules must survive untouched");
 
-  const second = patchPam(first.text, "/usr/bin/sandgate");
+  const second = patchPam(first.text, command);
   assert.equal(second.changed, false, "a second install must not duplicate the hook");
   assert.equal(second.text, first.text);
 });
@@ -57,7 +61,7 @@ test("an already-forced policy is accepted as-is", () => {
 });
 
 test("uninstall removes the managed block and leaves the rest alone", () => {
-  const installed = patchPam(PAM_BEFORE, "/usr/bin/sandgate").text;
+  const installed = patchPam(PAM_BEFORE, "/usr/bin/node /x.js ssh-guard approve").text;
   const removed = unpatch(installed, PAM_MARKER);
   assert.equal(removed.changed, true);
   assert.ok(!removed.text.includes("ssh-guard approve"), "the hook must be gone");

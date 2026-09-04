@@ -39,9 +39,9 @@ export interface PatchResult {
 }
 
 /** Append the pam_exec hook, once, as the last auth line. */
-export function patchPam(text: string, invocation: string): PatchResult {
+export function patchPam(text: string, command: string): PatchResult {
   if (text.includes(PAM_MARKER)) return { text, changed: false, note: "already present" };
-  const block = `\n${PAM_MARKER}\nauth required pam_exec.so quiet ${invocation} ssh-guard approve\n`;
+  const block = `\n${PAM_MARKER}\nauth required pam_exec.so quiet ${command}\n`;
   return { text: text.replace(/\s*$/, "\n") + block, changed: true };
 }
 
@@ -335,6 +335,21 @@ export function installHook(invocation?: string): InstallReport {
     return report;
   }
   report.steps.push("sshd -t accepted the configuration");
+
+  // The decisive check: can PAM actually run this command? A hook it
+  // cannot execute refuses every login, and sshd -t cannot see that.
+  const selfTest = hookRunsUnderPam(hook.argv);
+  if (!selfTest.ok) {
+    for (const [file, text] of originals) writeFileSync(file, text);
+    if (createdDropin) rmSync(DROPIN_FILE, { force: true });
+    report.rolledBack = true;
+    report.error =
+      "the hook does not run in PAM's bare environment, so it would have " +
+      `refused every login. Everything was reverted:
+${selfTest.output}`;
+    return report;
+  }
+  report.steps.push("the hook runs under PAM's environment");
 
   const reloaded = reloadSshd();
   report.steps.push(reloaded.ok ? "sshd reloaded" : `WARNING: ${reloaded.output}`);

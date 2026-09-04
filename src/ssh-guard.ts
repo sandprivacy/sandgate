@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { hostname } from "node:os";
 import { PwaApprover } from "./pwa-approver.js";
 import type { BiometricCredential } from "./webauthn.js";
+import { recall, remember, claim, release, awaitDecision } from "./ssh-decision-cache.js";
 
 /**
  * Blocking SSH approval: a login pauses until you tap on your phone.
@@ -83,8 +84,8 @@ export function describeLogin(login: LoginContext, config: SshGuardConfig) {
 }
 
 export type GuardOutcome =
-  | { allow: true; reason: "approved" | "exempt" | "not-auth-phase" | "fail-open" }
-  | { allow: false; reason: "denied" | "timeout" | "error"; detail?: string };
+  | { allow: true; reason: "approved" | "exempt" | "not-auth-phase" | "fail-open" | "recent-approval" }
+  | { allow: false; reason: "denied" | "timeout" | "error" | "recent-denial"; detail?: string };
 
 /**
  * Decide a login. Never throws: a guard that crashes must still produce a
@@ -103,6 +104,35 @@ export async function decideLogin(
     return { allow: true, reason: "exempt" };
   }
 
+  // sshd retries authentication, so one login means several hook calls.
+  // Reuse the answer you just gave: one buzz per login, and a refusal
+  // that actually holds for the whole attempt.
+  const recent = recall(login.user, login.rhost);
+  if (recent) {
+    return recent.allow
+      ? { allow: true, reason: "recent-approval" }
+      : { allow: false, reason: "recent-denial" };
+  }
+
+  // Only one hook per login talks to the phone; the others wait for its
+  // answer. Otherwise a single SSH attempt buzzes you half a dozen times.
+  if (!claim(login.user, login.rhost)) {
+    const shared = await awaitDecision(
+      login.user,
+      login.rhost,
+      (config.timeoutSec ?? 60) * 1000
+    );
+    if (shared) {
+      return shared.allow
+        ? { allow: true, reason: "recent-approval" }
+        : { allow: false, reason: "recent-denial" };
+    }
+    // No answer came: same rules as if we had asked ourselves.
+    return config.failOpen
+      ? { allow: true, reason: "fail-open" }
+      : { allow: false, reason: "timeout" };
+  }
+
   const approver = new PwaApprover({
     relayUrl: config.relayUrl,
     pairId: config.pairId,
@@ -118,14 +148,23 @@ export async function decideLogin(
       body,
       timeoutSec: config.timeoutSec ?? 60,
     });
-    if (result.approved) return { allow: true, reason: "approved" };
+    release(login.user, login.rhost);
+    if (result.approved) {
+      remember(login.user, login.rhost, true);
+      return { allow: true, reason: "approved" };
+    }
     // An explicit deny always blocks, even in failOpen: that is the point
-    // of being asked. Only silence is negotiable.
-    if (result.decision === "denied") return { allow: false, reason: "denied" };
+    // of being asked. Only silence is negotiable — and the refusal is
+    // remembered, so sshd's next retry cannot slip past it.
+    if (result.decision === "denied") {
+      remember(login.user, login.rhost, false);
+      return { allow: false, reason: "denied" };
+    }
     return config.failOpen
       ? { allow: true, reason: "fail-open" }
       : { allow: false, reason: "timeout" };
   } catch (err) {
+    release(login.user, login.rhost);
     const detail = err instanceof Error ? err.message : String(err);
     return config.failOpen
       ? { allow: true, reason: "fail-open" }

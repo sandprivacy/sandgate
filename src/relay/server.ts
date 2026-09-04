@@ -277,6 +277,20 @@ export async function startRelay(opts: {
         return;
       }
 
+      // A gateway that stopped waiting says so, instead of leaving a card
+      // on the phone that answers into the void.
+      if (req.method === "POST" && url.pathname === "/api/abandon") {
+        const body = await readBody(req);
+        if (!validId(body.pairId) || !validId(body.requestId)) {
+          return json(res, 400, { error: "pairId and requestId required" });
+        }
+        const pairing = getPairing(body.pairId);
+        if (pairing.requests.delete(body.requestId)) {
+          notifyListeners(pairing, "decision");
+        }
+        return json(res, 200, { ok: true });
+      }
+
       if (req.method === "GET" && url.pathname === "/api/pending") {
         const pairId = url.searchParams.get("pairId") ?? "";
         if (!validId(pairId)) return json(res, 400, { error: "bad pairId" });

@@ -135,6 +135,16 @@ export class PwaApprover implements Approver {
       }
       return { requestId, decision };
     }
+    // Out of time: withdraw the request so it stops sitting on the phone.
+    await this.fetchWithTimeout(
+      this.url("/api/abandon"),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pairId: this.config.pairId, requestId }),
+      },
+      10
+    ).catch(() => {});
     if (ignoredDecisions > 0) {
       // Worth surfacing: someone was answering for you, and failing.
       console.error(
