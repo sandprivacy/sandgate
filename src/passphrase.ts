@@ -47,6 +47,26 @@ export function dpapiDecryptCommand(filePath: string): string {
   return `powershell -NoProfile -Command "[Net.NetworkCredential]::new('', (Get-Content '${filePath}' | ConvertTo-SecureString)).Password"`;
 }
 
+/**
+ * Read the passphrase from the local OS store written by `sandgate
+ * protect`, if there is one. Convenience for interactive reads (showing
+ * your own 2FA code): same trust boundary as the MCP server, which
+ * already resolves the passphrase without a prompt.
+ */
+export function passphraseFromLocalStore(filePath: string): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  try {
+    const out = execSync(dpapiDecryptCommand(filePath), {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 15_000,
+    }).trim();
+    return out.length > 0 ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function resolvePassphrase(env: NodeJS.ProcessEnv): string | undefined {
   if (env.SANDGATE_PASSPHRASE) return env.SANDGATE_PASSPHRASE;
   const command = env.SANDGATE_PASSPHRASE_CMD;

@@ -79,6 +79,20 @@ passphrase: the switch lives inside the encrypted vault, so editing a
 config file — or running the command without the passphrase — cannot
 weaken your setup.
 
+## Your authenticator too, not just your agents'
+
+The seeds are already in the vault, so stop opening an authenticator app
+to read six digits:
+
+```bash
+sandgate totp                    # what's in the vault
+sandgate totp github.com --copy  # code in your clipboard, seconds left on screen
+```
+
+After `sandgate protect`, this doesn't even ask for the passphrase — the
+same OS-store lookup the MCP server uses. Read-only convenience;
+anything that changes state still asks.
+
 ## Policies
 
 ```bash

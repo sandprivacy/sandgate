@@ -5,7 +5,13 @@ import { join } from "node:path";
 import { read } from "read";
 import { getQuota } from "./sandmail.js";
 import { testImapConnection } from "./inbox.js";
-import { resolvePassphrase, protectPassphraseDpapi, dpapiDecryptCommand } from "./passphrase.js";
+import {
+  resolvePassphrase,
+  passphraseFromLocalStore,
+  protectPassphraseDpapi,
+  dpapiDecryptCommand,
+} from "./passphrase.js";
+import { execFileSync } from "node:child_process";
 import { auditPath } from "./paths.js";
 import {
   vaultExists,
@@ -25,6 +31,7 @@ const HELP = `sandgate — the human gateway for AI agents
 Usage:
   sandgate init                          Create the vault, connect Telegram & sandmail
   sandgate add-totp <domain> <secret>    Store a 2FA seed (base32 or otpauth:// URI)
+  sandgate totp [domain] [--copy]        Show your own 2FA code (no domain = list them)
   sandgate policy <domain> <auto|approve|deny>   Set the 2FA policy for a domain
   sandgate connect-telegram <bot-token>  Connect (or fix) the Telegram approval channel
   sandgate relay [port]                  Run the approval relay (serves the phone PWA)
@@ -140,6 +147,67 @@ async function cmdInit(): Promise<void> {
       `  sandgate add-totp github.com <secret>\n` +
       `  sandgate test-approval\n` +
       `Then register the MCP server in your agent (see README).`
+  );
+}
+
+/**
+ * Passphrase for read-only convenience commands: the environment, then the
+ * local OS store, then a prompt. Anything that CHANGES state still asks.
+ */
+async function getPassphraseQuick(prompter: Prompter): Promise<string> {
+  const fromEnv = resolvePassphrase(process.env);
+  if (fromEnv) return fromEnv;
+  const stored = passphraseFromLocalStore(join(sandgateDir(), "pass.dpapi"));
+  if (stored) return stored;
+  return getPassphrase(prompter);
+}
+
+function copyToClipboard(value: string): boolean {
+  try {
+    if (process.platform === "win32") {
+      execFileSync("clip", { input: value, windowsHide: true });
+    } else if (process.platform === "darwin") {
+      execFileSync("pbcopy", { input: value });
+    } else {
+      execFileSync("xclip", ["-selection", "clipboard"], { input: value });
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function cmdTotp(domain?: string, flag?: string): Promise<void> {
+  const prompter = new Prompter();
+  const pass = await getPassphraseQuick(prompter);
+  prompter.close();
+  const data = loadVault(pass);
+  const domains = Object.keys(data.totp).sort();
+
+  if (!domain) {
+    if (!domains.length) {
+      console.log("No 2FA seeds yet. Add one with: sandgate add-totp <domain> <secret>");
+      return;
+    }
+    console.log("2FA seeds in your vault:" + "\n" + domains.map((d) => "  " + d).join("\n"));
+    console.log("\nShow a code with: sandgate totp <domain> [--copy]");
+    return;
+  }
+
+  const key = domain.toLowerCase().replace(/^www\./, "");
+  const entry = data.totp[key];
+  if (!entry) {
+    console.error(
+      `No 2FA seed for "${key}".` +
+        (domains.length ? ` Known: ${domains.join(", ")}` : "")
+    );
+    process.exit(1);
+  }
+  const { code, secondsRemaining } = generateCode(entry.secret, entry);
+  const copied = flag === "--copy" ? copyToClipboard(code) : false;
+  console.log(
+    `${key}  ${code}  (${secondsRemaining}s left)` +
+      (flag === "--copy" ? (copied ? "  — copied to clipboard" : "  — clipboard unavailable") : "")
   );
 }
 
@@ -540,6 +608,8 @@ async function main(): Promise<void> {
       return cmdInit();
     case "add-totp":
       return cmdAddTotp(args[0], args[1]);
+    case "totp":
+      return cmdTotp(args[0], args[1]);
     case "policy":
       return cmdPolicy(args[0], args[1]);
     case "connect-telegram":

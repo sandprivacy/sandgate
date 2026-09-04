@@ -55,3 +55,18 @@ test("policies default to approve for 2FA and honor overrides", () => {
   saveConfig(config);
   assert.equal(totpPolicy(loadConfig(), "github.com"), "auto");
 });
+
+test("the vault doubles as your own authenticator: listing and code lookup", () => {
+  // Same seeds serve you and your agents — the point of `sandgate totp`.
+  saveVault("auth-pass", {
+    totp: {
+      "github.com": { secret: "JBSWY3DPEHPK3PXP" },
+      "gitlab.com": { secret: "JBSWY3DPEHPK3PXP" },
+    },
+  });
+  const data = loadVault("auth-pass");
+  assert.deepEqual(Object.keys(data.totp).sort(), ["github.com", "gitlab.com"]);
+  const { code, secondsRemaining } = generateCode(data.totp["github.com"]!.secret);
+  assert.match(code, /^\d{6}$/);
+  assert.ok(secondsRemaining >= 1 && secondsRemaining <= 30);
+});
