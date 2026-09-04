@@ -1,6 +1,6 @@
 {
   "name": "@sandprivacy/sandgate",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "The human gateway for AI agents — approvals, 2FA codes and email verification, self-hosted. Your agent asks; you decide; secrets never touch the LLM.",
   "license": "AGPL-3.0-only",
   "type": "module",

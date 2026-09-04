@@ -65,6 +65,15 @@ export const socketModeTransport: SlackTransport = {
   },
 };
 
+/**
+ * The title and body are written by whatever is asking — an agent under
+ * prompt injection included. In mrkdwn, "<!channel>" pages everyone and
+ * "<@U…>" impersonates a mention; neither may come from a request.
+ */
+export function escapeMrkdwn(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 export class SlackApprover implements Approver {
   private transport: SlackTransport;
   private fetchImpl: FetchLike;
@@ -99,7 +108,7 @@ export class SlackApprover implements Approver {
 
   private blocks(requestId: string, req: ApprovalRequest, kind: "approval" | "input") {
     const quorum = kind === "approval" ? Math.max(1, this.config.quorum ?? 1) : 1;
-    const text = [`*${req.title}*`, req.body ?? "", quorum > 1 ? `_${quorum} approvers must agree._` : ""]
+    const text = [`*${escapeMrkdwn(req.title)}*`, escapeMrkdwn(req.body ?? ""), quorum > 1 ? `_${quorum} approvers must agree._` : ""]
       .filter(Boolean)
       .join("\n");
     const actions =
@@ -182,7 +191,7 @@ export class SlackApprover implements Approver {
                 submit: { type: "plain_text", text: "Send" },
                 close: { type: "plain_text", text: "Cancel" },
                 blocks: [
-                  { type: "section", text: { type: "mrkdwn", text: `*${req.title}*${req.body ? "\n" + req.body : ""}` } },
+                  { type: "section", text: { type: "mrkdwn", text: `*${escapeMrkdwn(req.title)}*${req.body ? "\n" + escapeMrkdwn(req.body) : ""}` } },
                   {
                     type: "input",
                     block_id: "answer",
@@ -218,7 +227,7 @@ export class SlackApprover implements Approver {
       ts,
       text: `${req.title} — ${verdict}`,
       blocks: [
-        { type: "section", text: { type: "mrkdwn", text: `*${req.title}*${req.body ? "\n" + req.body : ""}` } },
+        { type: "section", text: { type: "mrkdwn", text: `*${escapeMrkdwn(req.title)}*${req.body ? "\n" + escapeMrkdwn(req.body) : ""}` } },
         { type: "context", elements: [{ type: "mrkdwn", text: `sandgate · ${verdict}` }] },
       ],
     }).catch(() => {});

@@ -127,12 +127,18 @@ export async function startRelay(opts: {
   };
 
   const ipHits = new Map<string, number[]>();
+  // A proxy on this host or this network may speak for the client. A
+  // stranger connecting straight to the port may not: their forged
+  // X-Forwarded-For would be a free pass around the limit.
+  const fromLocalProxy = (addr: string): boolean =>
+    /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|::ffff:(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)|f[cd][0-9a-f]{2}:)/i.test(addr);
   const clientIp = (req: IncomingMessage): string => {
-    // Behind nginx (the documented deployment) the socket address is the
-    // proxy's; the first X-Forwarded-For hop is the caller.
+    const peer = req.socket.remoteAddress ?? "?";
     const xff = req.headers["x-forwarded-for"];
-    if (typeof xff === "string" && xff.trim()) return xff.split(",")[0]!.trim();
-    return req.socket.remoteAddress ?? "?";
+    if (typeof xff === "string" && xff.trim() && fromLocalProxy(peer)) {
+      return xff.split(",")[0]!.trim();
+    }
+    return peer;
   };
   const ipLimited = (req: IncomingMessage): boolean => {
     const ip = clientIp(req);
@@ -177,6 +183,15 @@ export async function startRelay(opts: {
         if (entry.ts < cutoff) p.requests.delete(id);
       }
       if (p.claim && p.claim.ts < claimCutoff) p.claim = undefined;
+    }
+    // A pairing nobody uses is just a map entry that an attacker with a
+    // random-id generator can multiply. Forget the empty, idle ones.
+    const idleCutoff = Date.now() - 60 * 60 * 1000;
+    for (const [id, p] of pairings) {
+      const empty =
+        !p.subscription && !p.claim && p.requests.size === 0 && p.listeners.size === 0;
+      const idle = !p.lastSeen || p.lastSeen < idleCutoff;
+      if (empty && idle && !(p.claimedAt && p.claimedAt > idleCutoff)) pairings.delete(id);
     }
     const ipCutoff = Date.now() - IP_WINDOW_MS;
     for (const [ip, hits] of ipHits) {

@@ -48,3 +48,24 @@ test("both decisions expire, so the guard keeps asking", () => {
 test("an unknown login is never assumed", () => {
   assert.equal(recall("nobody", "nowhere"), null);
 });
+
+test("a directory we do not own is never trusted with decisions", async (t) => {
+  if (process.platform === "win32") return t.skip("mode bits are a POSIX thing");
+  const { directoryIsOurs } = await import("../ssh-decision-cache.js");
+  const { chmodSync, symlinkSync, mkdirSync } = await import("node:fs");
+  const base = mkdtempSync(join(tmpdir(), "sandgate-cache-own-"));
+
+  // Ours, private: fine.
+  assert.equal(directoryIsOurs(join(base, "private")), true);
+
+  // World-writable: any local user could plant an "approved" file here.
+  const open = join(base, "open");
+  mkdirSync(open, { recursive: true });
+  chmodSync(open, 0o777);
+  assert.equal(directoryIsOurs(open), false);
+
+  // A symlink someone left where we expected to create our directory.
+  const link = join(base, "link");
+  symlinkSync(open, link);
+  assert.equal(directoryIsOurs(link), false);
+});

@@ -130,3 +130,18 @@ test("connect-slack checks both tokens and resolves a channel name", async () =>
     /No channel named #nowhere/
   );
 });
+
+test("agent-written text cannot page the channel or fake a mention", async () => {
+  const { escapeMrkdwn } = await import("../slack.js");
+  assert.equal(escapeMrkdwn("<!channel> please approve <@U123>"), "&lt;!channel&gt; please approve &lt;@U123&gt;");
+  const slack = fakeSlack();
+  const approver = new SlackApprover(
+    { botToken: "xoxb", appToken: "xapp", channel: "C123" },
+    { transport: slack.transport, fetchImpl: slack.fetchImpl }
+  );
+  const pending = approver.request({ title: "<!channel> urgent", body: "<@U999> said yes", timeoutSec: 0.2 });
+  await pending;
+  const posted = slack.calls.find((c) => c.method === "chat.postMessage")!.body.blocks[0].text.text;
+  assert.ok(!posted.includes("<!channel>"), posted);
+  assert.ok(!posted.includes("<@U999>"), posted);
+});

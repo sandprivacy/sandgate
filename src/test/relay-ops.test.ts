@@ -64,3 +64,24 @@ test("the QR decoder is served from our own origin", async () => {
     assert.ok(body.length > 100_000, "the whole decoder, not a stub");
   });
 });
+
+test("behind a local proxy, X-Forwarded-For tells clients apart", async () => {
+  await withRelay(async (url) => {
+    // Tests connect from loopback, which IS a local proxy position: the
+    // header is honoured there. The rule under test is the predicate,
+    // exercised through the limit: two "clients" behind loopback are
+    // counted apart, so one of them can be limited while the other is not.
+    let limitedA = 0;
+    for (let i = 0; i < 250; i++) {
+      const res = await fetch(`${url}/api/pending?pairId=${newPairing().pairId}`, {
+        headers: { "x-forwarded-for": "203.0.113.5" },
+      });
+      if (res.status === 429) limitedA++;
+    }
+    assert.ok(limitedA > 0, "client A must hit the limit");
+    const fresh = await fetch(`${url}/api/pending?pairId=${newPairing().pairId}`, {
+      headers: { "x-forwarded-for": "203.0.113.6" },
+    });
+    assert.equal(fresh.status, 200, "client B is a different address and is not limited");
+  });
+});

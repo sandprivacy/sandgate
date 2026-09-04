@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, openSync, closeSync, rmSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, openSync, closeSync, rmSync, statSync, lstatSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -18,7 +18,44 @@ import { tmpdir } from "node:os";
  * sticks, which is the whole point of refusing.
  */
 
-const DIR = process.env.SANDGATE_SSH_CACHE_DIR || join(tmpdir(), "sandgate-ssh");
+/**
+ * Where decisions live. NOT a shared /tmp: a decision file that any local
+ * user could write is a forged approval, and a directory anyone could
+ * pre-create is one they own. Root gets /run (tmpfs, root-only, cleared
+ * on boot); anyone else gets a directory of their own under tmp.
+ */
+function defaultDir(): string {
+  if (process.platform !== "win32" && typeof process.getuid === "function" && process.getuid() === 0) {
+    return existsSync("/run") ? "/run/sandgate-ssh" : "/var/lib/sandgate/ssh-cache";
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : "user";
+  return join(tmpdir(), `sandgate-ssh-${uid}`);
+}
+const DIR = process.env.SANDGATE_SSH_CACHE_DIR || defaultDir();
+
+/**
+ * Refuse to use a directory we do not fully own. If any of this fails the
+ * cache is simply not used: every retry asks the phone again, which is
+ * annoying and safe — the opposite of trusting a stranger's files.
+ */
+export function directoryIsOurs(dir: string): boolean {
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const st = lstatSync(dir);
+    if (!st.isDirectory() || st.isSymbolicLink()) return false;
+    if (process.platform === "win32") return true; // ACLs, not mode bits
+    if (typeof process.getuid === "function" && st.uid !== process.getuid()) return false;
+    if ((st.mode & 0o022) !== 0) return false; // group/other writable: anyone can plant a decision
+    return true;
+  } catch {
+    return false;
+  }
+}
+let dirOk: boolean | null = null;
+function usable(): boolean {
+  if (dirOk === null) dirOk = directoryIsOurs(DIR);
+  return dirOk;
+}
 /** Long enough to cover sshd's retries, short enough to gate the next login. */
 export const APPROVAL_TTL_SEC = 20;
 /** A refusal outlives an approval: it must survive every retry of the attempt. */
@@ -43,8 +80,8 @@ function pathFor(user: string, rhost: string): string {
 }
 
 export function remember(user: string, rhost: string, allow: boolean): void {
+  if (!usable()) return;
   try {
-    mkdirSync(DIR, { recursive: true, mode: 0o700 });
     writeFileSync(pathFor(user, rhost), JSON.stringify({ allow, ts: Date.now() }), {
       mode: 0o600,
     });
@@ -55,6 +92,7 @@ export function remember(user: string, rhost: string, allow: boolean): void {
 }
 
 export function recall(user: string, rhost: string, now = Date.now()): CachedDecision | null {
+  if (!usable()) return null;
   try {
     const file = pathFor(user, rhost);
     if (!existsSync(file)) return null;
@@ -77,8 +115,8 @@ function claimPath(user: string, rhost: string): string {
  * for both.
  */
 export function claim(user: string, rhost: string): boolean {
+  if (!usable()) return true; // no shared state: everyone asks, nobody is refused
   try {
-    mkdirSync(DIR, { recursive: true, mode: 0o700 });
     const file = claimPath(user, rhost);
     if (existsSync(file)) {
       const age = Date.now() - statSync(file).mtimeMs;

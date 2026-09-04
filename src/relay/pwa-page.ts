@@ -135,8 +135,8 @@ async function describePush(data, store) {
   try {
     var key = await deriveKeyFrom(pair.secret, "approval-channel");
     var req = await openWith(key, data.payload, "req:" + data.requestId);
-    out.title = (store.pairs.length > 1 && pair.name ? pair.name + ": " : "") + req.title;
-    out.options.body = req.body || (req.kind === "input" ? "Tap to answer" : "Tap to decide");
+    out.title = ((store.pairs.length > 1 && pair.name ? pair.name + ": " : "") + String(req.title || "")).slice(0, 120);
+    out.options.body = String(req.body || (req.kind === "input" ? "Tap to answer" : "Tap to decide")).slice(0, 240);
     out.options.data = {
       pairId: data.pairId,
       requestId: data.requestId,
