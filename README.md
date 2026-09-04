@@ -93,6 +93,22 @@ After `sandgate protect`, this doesn't even ask for the passphrase — the
 same OS-store lookup the MCP server uses. Read-only convenience;
 anything that changes state still asks.
 
+## Beyond agents: SSH logins that wait for your thumb
+
+```bash
+sandgate ssh-guard pair vps-prod   # on your workstation
+sandgate ssh-guard install         # on the server: the PAM + sshd lines
+sandgate ssh-guard doctor          # checks the wiring and your escape hatch
+```
+
+An SSH login pauses until you approve it on your phone. Duo does this
+from their cloud, for a fee; ntfy plus a PAM script only *notifies* you
+after the fact. This blocks, end-to-end encrypted, on your own
+infrastructure — and the server holds nothing but its own pairing.
+
+Read [docs/ssh-guard.md](docs/ssh-guard.md) before enabling it: the
+danger is locking yourself out, not cryptography.
+
 ## Policies
 
 ```bash
@@ -140,6 +156,7 @@ How the trust works: the pairing secret travels once, inside the URL **fragment*
 - [x] `ask_human` — free-text answers (SMS codes on your real number, security questions)
 - [x] OS keychain for the vault passphrase (`SANDGATE_PASSPHRASE_CMD`, `sandgate protect`)
 - [x] Face ID / Touch ID on approvals, verified server-side (`sandgate enroll-biometric`)
+- [x] Blocking SSH approval (`sandgate ssh-guard`)
 - [ ] Slack approval channel with multiple approvers (teams)
 - [ ] Team policies (shared vault, centralized audit)
 - [x] Framework guides: [Claude Code](docs/integrations/claude-code.md), [browser-use](docs/integrations/browser-use.md), [Playwright MCP](docs/integrations/playwright-mcp.md), [LangGraph](docs/integrations/langgraph.md)

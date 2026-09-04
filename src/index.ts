@@ -13,6 +13,7 @@ import {
 } from "./passphrase.js";
 import { execFileSync } from "node:child_process";
 import { auditPath } from "./paths.js";
+import { audit } from "./audit.js";
 import {
   vaultExists,
   loadVault,
@@ -43,6 +44,7 @@ Usage:
   sandgate protect                       Store the passphrase in the OS store (Windows DPAPI)
   sandgate enroll-biometric              Enroll Face ID / Touch ID on the paired phone
   sandgate biometric <on|off>            Require a verified biometric for every approval
+  sandgate ssh-guard <cmd>               Blocking SSH approval (pair|test|install|doctor|approve)
   sandgate status                        Show what is configured and active
   sandgate audit [n]                     Show the last n audit entries (default 20)
   sandgate serve                         Run the MCP server (stdio)
@@ -632,6 +634,15 @@ async function main(): Promise<void> {
       return cmdEnrollBiometric();
     case "biometric":
       return cmdBiometric(args[0]);
+    case "ssh-guard": {
+      const { runSshGuard } = await import("./ssh-guard-cli.js");
+      return runSshGuard(args[0], args[1], async () => {
+        const prompter = new Prompter();
+        const pass = await getPassphrase(prompter);
+        prompter.close();
+        return pass;
+      });
+    }
     case "status":
       return cmdStatus();
     case "audit":
