@@ -364,15 +364,31 @@ export const PWA_HTML = `<!doctype html>
   }
   .answer-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   .answer-input:disabled { opacity: .5; }
+  .ghost {
+    display: block; width: 100%; padding: 12px; margin-top: 10px;
+    border-radius: 10px; cursor: pointer;
+    background: transparent; border: 1px solid var(--line); color: #cfc6b2;
+    font: 600 14.5px/1 inherit; font-family: inherit;
+  }
+  .ghost:active { background: var(--panel-raised); }
   .scan {
     position: fixed; inset: 0; z-index: 20;
-    background: #000;
+    background: var(--ground);
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 14px; padding: 20px;
+    gap: 18px; padding: 24px;
   }
-  .scan video { width: 100%; max-height: 70vh; border-radius: 12px; object-fit: cover; }
-  .scan p { color: var(--soft); font-size: 14px; text-align: center; margin: 0; }
-  .scan button.no { min-width: 140px; }
+  .scan .frame {
+    position: relative; width: min(86vw, 420px); aspect-ratio: 1;
+    border-radius: 18px; overflow: hidden; background: #000;
+    border: 1px solid var(--line);
+  }
+  .scan video { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .scan .frame::after {
+    content: ""; position: absolute; inset: 14%; border-radius: 14px;
+    border: 2px solid rgba(217,164,65,.75); pointer-events: none;
+  }
+  .scan p { color: var(--soft); font-size: 14px; text-align: center; margin: 0; max-width: 320px; }
+  .scan .ghost { width: auto; min-width: 180px; margin-top: 0; }
 </style>
 </head>
 <body>
@@ -541,11 +557,18 @@ export const PWA_HTML = `<!doctype html>
     var overlay = document.createElement("div");
     overlay.className = "scan";
     overlay.innerHTML =
-      '<video playsinline autoplay muted></video>' +
+      '<div class="frame"><video></video></div>' +
       '<p>Point the camera at the QR code printed by sandgate pair</p>' +
-      '<button class="no"><span>Cancel</span></button>';
+      '<button class="ghost">Cancel</button>';
     document.body.appendChild(overlay);
     var video = overlay.querySelector("video");
+    // Set as properties, not attributes: Safari ignores muted/playsinline
+    // that arrive through innerHTML, and a video that is not both stays
+    // black on iPhone.
+    video.muted = true;
+    video.playsInline = true;
+    video.setAttribute("playsinline", "");
+    video.autoplay = true;
     var stream = null;
     function stop() {
       if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
@@ -593,9 +616,8 @@ export const PWA_HTML = `<!doctype html>
   }
   function makeScanButton() {
     var b = document.createElement("button");
-    b.className = "ok";
-    b.style.marginTop = "12px";
-    b.innerHTML = "<span>Scan a QR code</span>";
+    b.className = "ghost";
+    b.textContent = "Scan a QR code";
     b.onclick = function () { scanPairing(takePairingText); };
     return b;
   }
@@ -1224,7 +1246,7 @@ export const PWA_HTML = `<!doctype html>
       if (document.getElementById("addPaste")) return;
       var input = document.createElement("input");
       input.id = "addPaste";
-      input.placeholder = "Paste a pairing link (sandgate pair)";
+      input.placeholder = "Paste a pairing link";
       input.autocomplete = "off";
       input.style.cssText = "width:100%;padding:10px 12px;margin-top:8px;background:var(--panel);border:1px solid var(--line);border-radius:8px;color:var(--ink);font:16px ui-monospace,monospace;box-sizing:border-box;";
       input.addEventListener("input", function (e) {
