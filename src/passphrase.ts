@@ -28,6 +28,9 @@ export function protectPassphraseDpapi(passphrase: string, filePath: string): vo
   const script =
     "$plain = [Console]::In.ReadToEnd().TrimEnd([char]13, [char]10); " +
     "if ($plain.Length -eq 0) { exit 2 }; " +
+    // Some PowerShell installs (GitHub's hosted runners, locked-down
+    // machines) do not autoload the Security module; ask for it outright.
+    "Import-Module Microsoft.PowerShell.Security -ErrorAction SilentlyContinue; " +
     "$ss = ConvertTo-SecureString $plain -AsPlainText -Force; " +
     `$ss | ConvertFrom-SecureString | Out-File -Encoding ascii '${filePath.replace(/'/g, "''")}'`;
   const result = spawnSync("powershell", ["-NoProfile", "-Command", script], {
@@ -44,7 +47,7 @@ export function protectPassphraseDpapi(passphrase: string, filePath: string): vo
 
 /** The command that decrypts what protectPassphraseDpapi wrote. */
 export function dpapiDecryptCommand(filePath: string): string {
-  return `powershell -NoProfile -Command "[Net.NetworkCredential]::new('', (Get-Content '${filePath}' | ConvertTo-SecureString)).Password"`;
+  return `powershell -NoProfile -Command "Import-Module Microsoft.PowerShell.Security -ErrorAction SilentlyContinue; [Net.NetworkCredential]::new('', (Get-Content '${filePath}' | ConvertTo-SecureString)).Password"`;
 }
 
 /**
