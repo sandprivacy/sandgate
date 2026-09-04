@@ -482,6 +482,16 @@ export const PWA_HTML = `<!doctype html>
     try { localStorage.setItem(PAIRS_KEY, JSON.stringify(pairs)); } catch (e) {}
     syncStore();
   }
+  // Requests this device already answered. With a quorum the relay keeps
+  // showing a request until enough devices have spoken; this one is done.
+  var ANSWERED_KEY = "sandgate_answered";
+  var answered = [];
+  try { answered = JSON.parse(localStorage.getItem(ANSWERED_KEY)) || []; } catch (e) {}
+  function markAnswered(requestId) {
+    answered.push(requestId);
+    while (answered.length > 200) answered.shift();
+    try { localStorage.setItem(ANSWERED_KEY, JSON.stringify(answered)); } catch (e) {}
+  }
   syncStore();
   function addPairing(parsed) {
     for (var i = 0; i < pairs.length; i++) {
@@ -982,6 +992,8 @@ export const PWA_HTML = `<!doctype html>
         raw = await (await fetch("/api/pending?pairId=" + encodeURIComponent(p.pairId))).json();
       } catch (e) { return; }
       for (var i = 0; i < raw.length; i++) {
+        // Still open for the other devices of a quorum; done for this one.
+        if (answered.indexOf(raw[i].requestId) >= 0) continue;
         var key = p.pairId + ":" + raw[i].requestId;
         seen[key] = true;
         if (cards[key]) continue;
@@ -1024,6 +1036,7 @@ export const PWA_HTML = `<!doctype html>
           : req.requireBiometric
             ? "agent · approval · Face ID"
             : "agent · approval request");
+    if (req.quorum > 1) who.textContent += " · " + req.quorum + " devices must approve";
     card.appendChild(who);
     var h = document.createElement("h2"); h.textContent = req.title; card.appendChild(h);
     // NOTE: never name this variable p — var is function-scoped and would
@@ -1144,6 +1157,7 @@ export const PWA_HTML = `<!doctype html>
         body: JSON.stringify({ pairId: c.pair.pairId, requestId: c.requestId, payload: payload }),
       });
       if (!res.ok) throw new Error("relay answered HTTP " + res.status);
+      markAnswered(c.requestId);
       if (cards[id]) {
         recordHist(histLabel(c), histDecision);
         cards[id].el.remove();

@@ -28,6 +28,8 @@ export interface PwaConfig {
   /** When set, decisions must carry an assertion from this credential. */
   biometric?: BiometricCredential;
   requireBiometric?: boolean;
+  /** Distinct devices that must approve (default 1). One Deny refuses. */
+  quorum?: number;
 }
 
 interface DecisionPayload {
@@ -37,6 +39,8 @@ interface DecisionPayload {
   ts: number;
   assertion?: AssertionEvidence;
   enrollment?: EnrollmentEvidence;
+  /** Random per-device id the app attaches, so a quorum can tell phones apart. */
+  deviceId?: string;
 }
 
 export class PwaApprover implements Approver {
@@ -68,6 +72,9 @@ export class PwaApprover implements Approver {
     // Biometric enforcement travels inside the sealed request: the relay
     // cannot see it, and the phone cannot be told to skip it by anyone else.
     const needsBiometric = kind !== "enroll" && !!this.config.requireBiometric;
+    // Enrolment and typed answers come from one device; only approvals
+    // can require several.
+    const quorum = kind === "approval" ? Math.max(1, this.config.quorum ?? 1) : 1;
     const sealed = seal(
       this.key,
       {
@@ -78,6 +85,7 @@ export class PwaApprover implements Approver {
         ts: Date.now(),
         requireBiometric: needsBiometric,
         credentialId: needsBiometric ? this.config.biometric?.credentialId : undefined,
+        quorum,
       },
       aadForRequest(requestId)
     );
@@ -87,64 +95,89 @@ export class PwaApprover implements Approver {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pairId: this.config.pairId, requestId, payload: sealed }),
+        body: JSON.stringify({ pairId: this.config.pairId, requestId, payload: sealed, needed: quorum }),
       },
       15
     );
     if (!post.ok) throw new Error(`Relay refused the request (HTTP ${post.status}).`);
 
+    const close = () =>
+      this.fetchWithTimeout(
+        this.url("/api/abandon"),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pairId: this.config.pairId, requestId }),
+        },
+        10
+      ).catch(() => {});
+
     const deadline = Date.now() + req.timeoutSec * 1000;
     let ignoredDecisions = 0;
+    let seen = 0;
+    // Devices that approved so far. A decision without a device id — an
+    // app from before quorums — counts as one anonymous device, never more:
+    // one phone must not be able to make up a quorum by tapping twice.
+    const approvedBy = new Set<string>();
+    let approvedDecision: DecisionPayload | null = null;
     while (Date.now() < deadline) {
       const pollSec = Math.min(25, Math.max(1, Math.ceil((deadline - Date.now()) / 1000)));
       const res = await this.fetchWithTimeout(
         this.url(
           `/api/decision?pairId=${encodeURIComponent(this.config.pairId)}` +
-            `&requestId=${encodeURIComponent(requestId)}&timeoutSec=${pollSec}`
+            `&requestId=${encodeURIComponent(requestId)}&timeoutSec=${pollSec}&after=${seen}`
         ),
         {},
         pollSec + 10
       );
       if (res.status === 204) continue;
       if (!res.ok) throw new Error(`Relay error while waiting (HTTP ${res.status}).`);
-      const { payload } = (await res.json()) as { payload: any };
-      let decision: DecisionPayload;
-      try {
-        decision = open<DecisionPayload>(this.key, payload, aadForDecision(requestId));
-      } catch {
-        // Not sealed with our key: forged, or another party's noise. It is
-        // not an answer, so it must not end the wait — the real one may
-        // still arrive, and silence remains a refusal.
-        ignoredDecisions++;
-        await new Promise((r) => setTimeout(r, 500));
-        continue;
-      }
-      if (decision.requestId !== requestId) continue; // belt and suspenders; AAD already binds it
-      if (needsBiometric && decision.approved) {
-        // Fail closed: an approval without a verifiable assertion is not
-        // an approval. verifyAssertion throws on anything suspicious.
-        if (!this.config.biometric) {
-          throw new Error(
-            "Biometric approval is required but no credential is enrolled. Run `sandgate enroll-biometric`."
-          );
+      const body = (await res.json()) as { payload: any; payloads?: any[] };
+      const payloads: any[] = body.payloads ?? [body.payload];
+      const fresh = payloads.slice(seen);
+      seen = payloads.length;
+      for (const payload of fresh) {
+        let decision: DecisionPayload;
+        try {
+          decision = open<DecisionPayload>(this.key, payload, aadForDecision(requestId));
+        } catch {
+          // Not sealed with our key: forged, or another party's noise. It is
+          // not an answer, so it must not end the wait — the real one may
+          // still arrive, and silence remains a refusal.
+          ignoredDecisions++;
+          continue;
         }
-        if (!decision.assertion) {
-          throw new Error("Approval arrived without the required biometric assertion.");
+        if (decision.requestId !== requestId) continue; // belt and suspenders; AAD already binds it
+        if (!decision.approved) {
+          // One refusal is final, however many others said yes.
+          await close();
+          return { requestId, decision };
         }
-        verifyAssertion(decision.assertion, this.config.biometric, requestId);
+        if (needsBiometric) {
+          // Fail closed: an approval without a verifiable assertion is not
+          // an approval. verifyAssertion throws on anything suspicious.
+          if (!this.config.biometric) {
+            throw new Error(
+              "Biometric approval is required but no credential is enrolled. Run `sandgate enroll-biometric`."
+            );
+          }
+          if (!decision.assertion) {
+            throw new Error("Approval arrived without the required biometric assertion.");
+          }
+          verifyAssertion(decision.assertion, this.config.biometric, requestId);
+        }
+        approvedBy.add(decision.deviceId || "anonymous-device");
+        approvedDecision = decision;
+        if (approvedBy.size >= quorum) {
+          if (quorum > 1) await close(); // the other phones can stop showing it
+          return { requestId, decision };
+        }
       }
-      return { requestId, decision };
+      if (fresh.length === 0) await new Promise((r) => setTimeout(r, 300));
     }
+    void approvedDecision;
     // Out of time: withdraw the request so it stops sitting on the phone.
-    await this.fetchWithTimeout(
-      this.url("/api/abandon"),
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pairId: this.config.pairId, requestId }),
-      },
-      10
-    ).catch(() => {});
+    await close();
     if (ignoredDecisions > 0) {
       // Worth surfacing: someone was answering for you, and failing.
       console.error(
@@ -204,5 +237,6 @@ export function pwaApproverFrom(vault: VaultData, config: Config): PwaApprover |
     ...vault.pwa,
     biometric: vault.biometric,
     requireBiometric: biometricRequired(vault, config),
+    quorum: vault.pwa.quorum,
   });
 }

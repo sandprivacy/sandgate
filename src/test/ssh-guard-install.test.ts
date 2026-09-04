@@ -178,7 +178,7 @@ test("a compiled sandgate binary is the hook itself; node gets its script", asyn
   const { looksLikeNode } = await import("../ssh-guard-install.js");
   // Node, wherever it lives.
   assert.equal(looksLikeNode("/usr/bin/node"), true);
-  assert.equal(looksLikeNode("C:\Program Files\nodejs\node.exe"), true);
+  assert.equal(looksLikeNode(["C:", "Program Files", "nodejs", "node.exe"].join(String.fromCharCode(92))), true);
   assert.equal(looksLikeNode("/home/u/.nvm/versions/node/v22.0.0/bin/node"), true);
   // A standalone build from the release workflow: one file, no interpreter.
   assert.equal(looksLikeNode("/usr/local/bin/sandgate"), false);

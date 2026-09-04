@@ -18,8 +18,15 @@ interface RelayRequestEntry {
   requestId: string;
   payload: unknown;
   ts: number;
-  decision?: unknown;
-  waiters: ((decision: unknown) => void)[];
+  /**
+   * Every sealed decision received, in order. A gateway that wants more
+   * than one device to agree reads them all; the first one is also
+   * exposed as `payload` for gateways that predate quorums.
+   */
+  decisions: unknown[];
+  /** How many decisions the gateway wants before the phones stop showing it. */
+  needed: number;
+  waiters: ((decisions: unknown[]) => void)[];
 }
 
 interface Pairing {
@@ -255,7 +262,7 @@ export async function startRelay(opts: {
       if (req.method === "GET" && url.pathname === "/api/metrics") {
         let activeRequests = 0;
         for (const p of pairings.values()) {
-          for (const e of p.requests.values()) if (e.decision === undefined) activeRequests++;
+          for (const e of p.requests.values()) if (e.decisions.length < e.needed) activeRequests++;
         }
         const lines = [
           "# TYPE sandgate_relay_requests_total counter",
@@ -291,7 +298,7 @@ export async function startRelay(opts: {
       if (req.method === "GET" && url.pathname === "/api/health") {
         let activeRequests = 0;
         for (const p of pairings.values()) {
-          for (const e of p.requests.values()) if (e.decision === undefined) activeRequests++;
+          for (const e of p.requests.values()) if (e.decisions.length < e.needed) activeRequests++;
         }
         return json(res, 200, {
           ok: true,
@@ -377,7 +384,7 @@ export async function startRelay(opts: {
         pairing.recent = pairing.recent.filter((t) => now - t < RATE_WINDOW_MS);
         let undecided = 0;
         for (const entry of pairing.requests.values()) {
-          if (entry.decision === undefined && now - entry.ts < REQUEST_TTL_MS) undecided++;
+          if (entry.decisions.length < entry.needed && now - entry.ts < REQUEST_TTL_MS) undecided++;
         }
         if (pairing.recent.length >= MAX_REQUESTS_PER_WINDOW || undecided >= MAX_UNDECIDED) {
           return json(res, 429, {
@@ -389,10 +396,16 @@ export async function startRelay(opts: {
         pairing.recent.push(now);
         metrics.requests++;
 
+        // `needed` is the one thing about a request the relay is told in
+        // the clear: how many answers to collect before hiding it from the
+        // phones. It reveals that a quorum exists, not what is being asked.
+        const needed = Math.min(10, Math.max(1, parseInt(String(body.needed ?? 1), 10) || 1));
         pairing.requests.set(body.requestId, {
           requestId: body.requestId,
           payload: body.payload,
           ts: Date.now(),
+          decisions: [],
+          needed,
           waiters: [],
         });
         if (pairing.subscription) {
@@ -466,8 +479,14 @@ export async function startRelay(opts: {
         const pairId = url.searchParams.get("pairId") ?? "";
         if (!validId(pairId)) return json(res, 400, { error: "bad pairId" });
         const items = [...getPairing(pairId).requests.values()]
-          .filter((e) => e.decision === undefined)
-          .map((e) => ({ requestId: e.requestId, payload: e.payload, ts: e.ts }));
+          .filter((e) => e.decisions.length < e.needed)
+          .map((e) => ({
+            requestId: e.requestId,
+            payload: e.payload,
+            ts: e.ts,
+            decisions: e.decisions.length,
+            needed: e.needed,
+          }));
         return json(res, 200, items);
       }
 
@@ -478,10 +497,12 @@ export async function startRelay(opts: {
         }
         const entry = getPairing(body.pairId).requests.get(body.requestId);
         if (!entry) return json(res, 404, { error: "unknown request" });
-        if (entry.decision !== undefined) return json(res, 200, { ok: true }); // first tap wins
+        // Enough already? Late taps are acknowledged and dropped: with a
+        // quorum of one this is the old "first tap wins".
+        if (entry.decisions.length >= entry.needed) return json(res, 200, { ok: true });
         metrics.decisions++;
-        entry.decision = body.payload;
-        for (const waiter of entry.waiters.splice(0)) waiter(body.payload);
+        entry.decisions.push(body.payload);
+        for (const waiter of entry.waiters.splice(0)) waiter(entry.decisions);
         notifyListeners(getPairing(body.pairId), "decision");
         return json(res, 200, { ok: true });
       }
@@ -493,16 +514,21 @@ export async function startRelay(opts: {
         if (!validId(pairId) || !validId(requestId)) return json(res, 400, { error: "bad ids" });
         const entry = getPairing(pairId).requests.get(requestId);
         if (!entry) return json(res, 404, { error: "unknown request" });
-        if (entry.decision !== undefined) return json(res, 200, { payload: entry.decision });
+        // `after`: how many decisions the caller has already seen. It gets
+        // an answer as soon as there are more — the first one right away.
+        const after = Math.max(0, parseInt(url.searchParams.get("after") ?? "0", 10) || 0);
+        const reply = (decisions: unknown[]) =>
+          json(res, 200, { payload: decisions[0], payloads: decisions });
+        if (entry.decisions.length > after) return reply(entry.decisions);
         const timer = setTimeout(() => {
           const idx = entry.waiters.indexOf(waiter);
           if (idx >= 0) entry.waiters.splice(idx, 1);
           res.writeHead(204);
           res.end();
         }, timeoutSec * 1000);
-        const waiter = (decision: unknown) => {
+        const waiter = (decisions: unknown[]) => {
           clearTimeout(timer);
-          json(res, 200, { payload: decision });
+          reply(decisions);
         };
         entry.waiters.push(waiter);
         return;
