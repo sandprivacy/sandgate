@@ -915,12 +915,17 @@ async function main(): Promise<void> {
       // URL, and generates a brand-new pairing of its own. Same quick
       // unlock as `totp`, so a machine with `protect` set up is not
       // prompted for a command that changes nothing.
-      return runSshGuard(args[0], args[1], async () => {
-        const prompter = new Prompter();
-        const pass = await getPassphraseQuick(prompter);
-        prompter.close();
-        return pass;
-      });
+      return runSshGuard(
+        args[0],
+        args[1],
+        async () => {
+          const prompter = new Prompter();
+          const pass = await getPassphraseQuick(prompter);
+          prompter.close();
+          return pass;
+        },
+        args.slice(2)
+      );
     }
     case "status":
       return cmdStatus();

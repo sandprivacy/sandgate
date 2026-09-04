@@ -154,6 +154,12 @@ because sshd keeps the first value it sees.
 }
 ```
 
+`sandgate ssh-guard pair vps-prod --biometric` fills in the last one for
+you: the server gets the public key of the device you enrolled with
+`sandgate enroll-biometric`, and every SSH approval then needs Face ID
+or Touch ID on that device. Biometrics are per pairing — your workstation
+requiring them says nothing about a server.
+
 ## What it protects against, and what it does not
 
 **It stops** a stolen key, a leaked password, a brute-forced login: the

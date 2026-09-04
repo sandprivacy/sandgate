@@ -190,3 +190,46 @@ test("an approval signed by a different authenticator is refused, fail closed", 
     }
   });
 });
+
+test("with biometrics required, a typed answer is signed too — and accepted", async () => {
+  await withRelay(async (relayUrl) => {
+    const pairing = newPairing();
+    const device = keypair();
+    const credentialId = Buffer.from("cred-2");
+
+    const enrollPage = await loadPage(relayUrl, { hash: `#p=${pairing.pairId}&s=${pairing.secret}` });
+    installAuthenticator(enrollPage.window, { ...device, credentialId });
+    const enroller = new PwaApprover({ relayUrl, pairId: pairing.pairId, secret: pairing.secret });
+    const enrolling = enroller.enroll(20);
+    (await waitFor(() => enrollPage.window.document.querySelector(".card button.ok"))).click();
+    const credential = await enrolling;
+    enrollPage.close();
+    assert.ok(credential);
+
+    // A real user hit this: `sandgate ask --input` with Face ID on failed
+    // with "Approval arrived without the required biometric assertion",
+    // because the input card sent the answer plain.
+    const page = await loadPage(relayUrl, { hash: `#p=${pairing.pairId}&s=${pairing.secret}` });
+    installAuthenticator(page.window, { ...device, credentialId });
+    try {
+      const approver = new PwaApprover({
+        relayUrl,
+        pairId: pairing.pairId,
+        secret: pairing.secret,
+        biometric: credential!,
+        requireBiometric: true,
+      });
+      const asking = approver.ask({ title: "SMS code?", timeoutSec: 20 });
+
+      const sendBtn = await waitFor(() => page.window.document.querySelector(".card button.ok"));
+      assert.match(sendBtn.textContent, /Face ID/, "the button must say what it will do");
+      page.window.document.querySelector(".card .answer-input").value = "482913";
+      sendBtn.click();
+
+      assert.deepEqual(await asking, { answer: "482913", decision: "answered" });
+      assert.deepEqual(page.alerts, [], `page alerted: ${page.alerts.join(" | ")}`);
+    } finally {
+      page.close();
+    }
+  });
+});

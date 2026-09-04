@@ -22,7 +22,8 @@ type AskPassphrase = () => Promise<string>;
 export async function runSshGuard(
   sub: string | undefined,
   arg: string | undefined,
-  askPassphrase: AskPassphrase
+  askPassphrase: AskPassphrase,
+  flags: string[] = []
 ): Promise<void> {
   const configPath = configPathFromEnv();
 
@@ -30,7 +31,7 @@ export async function runSshGuard(
     case "approve":
       return approve(configPath);
     case "pair":
-      return pair(arg, askPassphrase, configPath);
+      return pair(arg, askPassphrase, configPath, flags.includes("--biometric"));
     case "test":
       return test(configPath);
     case "setup":
@@ -101,12 +102,17 @@ async function approve(configPath: string): Promise<void> {
 async function pair(
   name: string | undefined,
   askPassphrase: AskPassphrase,
-  configPath: string
+  configPath: string,
+  withBiometric = false
 ): Promise<void> {
   const pass = await askPassphrase();
   const data = loadVault(pass);
   if (!data.pwa) {
     console.error("Pair your phone first: sandgate pair <relay-url>");
+    process.exit(1);
+  }
+  if (withBiometric && !data.biometric) {
+    console.error("--biometric needs an enrolled device: run `sandgate enroll-biometric` first.");
     process.exit(1);
   }
   const { newPairing, newClaimSecret, sealClaim, publishClaim, pairingLink } = await import(
@@ -125,6 +131,9 @@ async function pair(
     // Notification mode to begin with: the first install must not be able
     // to lock anyone out. `ssh-guard enforce` is the deliberate step.
     failOpen: true,
+    // Face ID on SSH approvals too: the server gets the enrolled PUBLIC
+    // key, so it can verify the phone's signature by itself.
+    ...(withBiometric ? { biometric: data.biometric, requireBiometric: true } : {}),
   };
 
   // The phone gets a one-time claim on the secret, never the secret itself;
@@ -144,7 +153,8 @@ async function pair(
 
   console.log(
     [
-      `A pairing of its own for "${serverName}", separate from your workstation:`,
+      `A pairing of its own for "${serverName}", separate from your workstation` +
+        (withBiometric ? " — approvals will require Face ID / Touch ID:" : ":"),
       "revoking this one server later is a single line removed on the phone,",
       "and the server never holds your vault — only the right to ask.",
       "",

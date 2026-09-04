@@ -1096,10 +1096,23 @@ export const PWA_HTML = `<!doctype html>
         submitDecision(id, { requestId: requestId, approved: false, ts: Date.now() }, "denied", btn);
       }));
     } else if (isInput) {
-      var sendBtn = makeActionBtn("Send", "ok", CHECK, function (btn) {
+      // A typed answer is at least as sensitive as a yes: when the gateway
+      // requires a biometric, it is required here too — the gateway refuses
+      // an answer without one, so sending it plain was a guaranteed failure.
+      var sendBtn = makeActionBtn(req.requireBiometric ? "Send with Face ID" : "Send", "ok", CHECK, function (btn) {
         var value = input.value.trim();
         if (!value) { input.focus(); return; }
-        submitDecision(id, { requestId: requestId, approved: true, answer: value, ts: Date.now() }, "answered", btn);
+        if (!req.requireBiometric) {
+          submitDecision(id, { requestId: requestId, approved: true, answer: value, ts: Date.now() }, "answered", btn);
+          return;
+        }
+        btn.disabled = true;
+        doAssert(requestId, req.credentialId).then(function (assertion) {
+          submitDecision(id, { requestId: requestId, approved: true, answer: value, ts: Date.now(), assertion: assertion }, "answered", btn);
+        }).catch(function (e) {
+          btn.disabled = false;
+          alert("Face ID check failed, answer not sent: " + (e && e.message ? e.message : e));
+        });
       });
       input.addEventListener("keydown", function (e) {
         if (e.key === "Enter") sendBtn.click();
