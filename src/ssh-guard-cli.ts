@@ -370,17 +370,18 @@ async function doctor(configPath: string): Promise<void> {
     if (!hooked) problems.push(`add the pam_exec line to ${pamFile} (see: ssh-guard install)`);
   }
 
-  const sshdFile = "/etc/ssh/sshd_config";
-  if (existsSync(sshdFile)) {
-    const text = readFileSync(sshdFile, "utf8");
-    // Without this, public-key logins skip the PAM auth stack entirely and
-    // sail past the guard — the mistake that makes people think it works.
-    const forced = /^\s*AuthenticationMethods\s+.*keyboard-interactive:pam/m.test(text);
+  // Ask sshd what it actually resolved to: reading sshd_config alone
+  // misses drop-in files, and reported a correct install as broken.
+  const { effectiveSshdSettings } = await import("./ssh-guard-install.js");
+  const settings = effectiveSshdSettings();
+  if (settings) {
+    const methods = settings.get("authenticationmethods") ?? "any";
+    const forced = methods.includes("keyboard-interactive:pam");
     console.log(`key logins go through PAM ${forced ? "ok" : "NOT FORCED"}`);
     if (!forced) {
       problems.push(
-        `add "AuthenticationMethods publickey,keyboard-interactive:pam" to ${sshdFile}, ` +
-          "otherwise key-based logins never ask for approval"
+        `sshd resolves AuthenticationMethods to "${methods}", so key-based logins ` +
+          "never reach the hook — rerun `sandgate ssh-guard install`"
       );
     }
   }
