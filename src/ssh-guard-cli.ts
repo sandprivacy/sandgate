@@ -33,6 +33,8 @@ export async function runSshGuard(
       return pair(arg, askPassphrase, configPath);
     case "test":
       return test(configPath);
+    case "setup":
+      return setup(configPath, arg);
     case "install":
       return install(configPath, arg === "--manual");
     case "enforce":
@@ -46,6 +48,7 @@ export async function runSshGuard(
         [
           "Usage: sandgate ssh-guard <pair|install|test|enforce|doctor|uninstall|approve>",
           "  pair [name]      on your workstation: give this server its own pairing",
+          "  setup <blob>     on the server, as root: write the config AND wire it up",
           "  install          on the server, as root: wire it up (notification mode)",
           "  install --manual print the lines instead of applying them",
           "  test             send a fake login to your phone",
@@ -136,14 +139,92 @@ async function pair(
     ].join("\n")
   );
   qrcode.generate(link, { small: true });
+  const blob = Buffer.from(JSON.stringify(config), "utf8").toString("base64");
   console.log(
     [
       "",
-      `2. Write this on the server as ${configPath} (root, chmod 600):`,
+      "2. On the server, once (needs Node 18+):",
       "",
-      JSON.stringify(config, null, 2),
+      "     npm i -g @sandprivacy/sandgate",
+      `     sudo sandgate ssh-guard setup ${blob}`,
       "",
-      "3. Then, on the server: sandgate ssh-guard install",
+      "   That single command writes the config and wires up PAM, in",
+      "   notification mode so it cannot lock you out.",
+      "",
+      "   The blob carries this server's pairing secret, so it will sit in",
+      "   your shell history. Prefer to avoid that? Pipe it instead:",
+      "     ... | sudo sandgate ssh-guard setup -",
+    ].join("\n")
+  );
+}
+
+/**
+ * The whole server-side install in one line: decode the blob printed by
+ * `ssh-guard pair`, write it where it belongs with the right permissions,
+ * then wire up PAM. Pass "-" to read the blob from stdin instead, when you
+ * would rather it not appear in ps output or shell history.
+ */
+async function setup(configPath: string, blob: string | undefined): Promise<void> {
+  const { installHook, isRoot } = await import("./ssh-guard-install.js");
+  const { writeFileSync, mkdirSync } = await import("node:fs");
+  const { dirname } = await import("node:path");
+
+  if (!isRoot()) {
+    console.error("Run this as root (sudo): it writes to /etc and edits sshd's configuration.");
+    process.exit(1);
+  }
+  let encoded = blob;
+  if (!encoded || encoded === "-") {
+    encoded = await new Promise<string>((resolve) => {
+      let data = "";
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (chunk) => (data += chunk));
+      process.stdin.on("end", () => resolve(data.trim()));
+    });
+  }
+  if (!encoded) {
+    console.error("Usage: sudo sandgate ssh-guard setup <blob from `ssh-guard pair`>");
+    process.exit(1);
+  }
+
+  let config: unknown;
+  try {
+    config = JSON.parse(Buffer.from(encoded.trim(), "base64").toString("utf8"));
+  } catch {
+    console.error("That blob is not readable. Copy the whole line printed by `ssh-guard pair`.");
+    process.exit(1);
+  }
+  for (const field of ["relayUrl", "pairId", "secret"]) {
+    if (!(config as Record<string, unknown>)[field]) {
+      console.error(`The config is missing "${field}" — copy the whole blob.`);
+      process.exit(1);
+    }
+  }
+
+  mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
+  writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+  console.log(`  config written to ${configPath} (root, 0600)`);
+
+  const report = installHook(binaryInvocation());
+  for (const step of report.steps) console.log(`  ${step}`);
+  if (report.backups.length) console.log(`  backups: ${report.backups.join(", ")}`);
+  if (report.error) {
+    console.error("\n" + report.error);
+    process.exit(1);
+  }
+  console.log(
+    [
+      "",
+      "Installed in NOTIFICATION mode — this step cannot lock you out:",
+      "logins are announced on your phone and a Deny stops them, but",
+      "silence still lets them through.",
+      "",
+      "Now, WITHOUT closing this session:",
+      "  1. sandgate ssh-guard test          (your phone should buzz)",
+      "  2. open a NEW ssh session           (it should ask, then let you in)",
+      "  3. sandgate ssh-guard enforce --yes (start actually blocking)",
+      "",
+      "To undo everything: sudo sandgate ssh-guard uninstall",
     ].join("\n")
   );
 }

@@ -96,9 +96,9 @@ anything that changes state still asks.
 ## Beyond agents: SSH logins that wait for your thumb
 
 ```bash
-sandgate ssh-guard pair vps-prod    # on your workstation
-sudo sandgate ssh-guard install     # on the server: one command, backs up and self-checks
-sandgate ssh-guard enforce --yes    # once you have verified, start blocking
+sandgate ssh-guard pair vps-prod         # on your workstation: prints one line
+sudo sandgate ssh-guard setup eyJ...     # on the server: that line, and you are done
+sandgate ssh-guard enforce --yes         # once verified, start blocking
 ```
 
 An SSH login pauses until you approve it on your phone. Duo does this
@@ -140,6 +140,9 @@ sandgate pair https://your-relay  # prints a link + QR — open it on your phone
 ```
 
 How the trust works: the pairing secret travels once, inside the URL **fragment** (never sent to any server). Both ends derive an AES-256-GCM key (HKDF); every approval request and every tap is sealed with the request id bound into the AAD. The relay stores and forwards blobs it cannot read, and cannot forge — a malicious relay can at worst drop or delay an answer, which is just a deny. Push notifications wake the phone; if push is unavailable the PWA polls while open. A real phone needs the relay behind TLS (service workers require it); `http://localhost:8787` works for a desktop-browser test.
+
+Full threat model, including what it does *not* protect against and its
+known weaknesses: [SECURITY.md](SECURITY.md).
 
 ## Security notes, honestly
 

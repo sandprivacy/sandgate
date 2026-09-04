@@ -36,20 +36,21 @@ It prints a link and a QR for your phone (add it with "+ add a vault", so
 the server shows up under its own name), then the JSON config to install
 on the server.
 
-**On the server — one command:**
+**On the server — literally one command** (plus installing the package):
 
 ```bash
-sudo install -d -m 700 /etc/sandgate
-sudo tee /etc/sandgate/ssh-guard.json > /dev/null   # paste, Ctrl-D
-sudo chmod 600 /etc/sandgate/ssh-guard.json
-
-sudo sandgate ssh-guard install
+npm i -g @sandprivacy/sandgate
+sudo sandgate ssh-guard setup eyJyZWxheVVybCI6...   # the exact line `pair` printed
 ```
 
-That single command edits `/etc/pam.d/sshd` and `/etc/ssh/sshd_config`,
-having first backed both up; if `sshd -t` rejects the result it puts
-everything back and refuses to reload. It is idempotent, and
+`setup` decodes the pairing, writes `/etc/sandgate/ssh-guard.json` as
+root with mode 0600, then wires up PAM: it backs up `/etc/pam.d/sshd` and
+`/etc/ssh/sshd_config`, applies the hook, and if `sshd -t` rejects the
+result it puts everything back and never reloads. Idempotent;
 `sudo sandgate ssh-guard uninstall` removes exactly what it added.
+
+The blob carries this server's pairing secret, so it lands in your shell
+history. To avoid that, pipe it instead: `... | sudo sandgate ssh-guard setup -`.
 
 **It lands in notification mode**, so this first step cannot lock you
 out: logins are announced on your phone and an explicit Deny stops them,
@@ -63,7 +64,8 @@ sandgate ssh-guard enforce --yes     # now silence refuses logins
 
 `enforce` refuses to run until you have an escape hatch. Prefer to see
 the lines before they are applied? `sandgate ssh-guard install --manual`
-prints them and touches nothing.
+prints them and touches nothing, and `install` alone wires up a config
+you placed yourself.
 
 ## Not locking yourself out
 
