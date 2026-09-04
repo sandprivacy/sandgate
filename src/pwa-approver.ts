@@ -50,6 +50,15 @@ export class PwaApprover implements Approver {
     return this.config.relayUrl.replace(/\/$/, "") + path;
   }
 
+  /**
+   * Never wait forever on the network. A relay that accepts a connection
+   * and then goes silent must not freeze the caller — an SSH login held
+   * open by a hung fetch is a locked door.
+   */
+  private fetchWithTimeout(url: string, init: RequestInit, seconds: number) {
+    return fetch(url, { ...init, signal: AbortSignal.timeout(seconds * 1000) });
+  }
+
   /** Post a sealed request and long-poll its sealed decision (or null on timeout). */
   private async roundTrip(
     kind: "approval" | "input" | "enroll",
@@ -73,26 +82,43 @@ export class PwaApprover implements Approver {
       aadForRequest(requestId)
     );
 
-    const post = await fetch(this.url("/api/request"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pairId: this.config.pairId, requestId, payload: sealed }),
-    });
+    const post = await this.fetchWithTimeout(
+      this.url("/api/request"),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pairId: this.config.pairId, requestId, payload: sealed }),
+      },
+      15
+    );
     if (!post.ok) throw new Error(`Relay refused the request (HTTP ${post.status}).`);
 
     const deadline = Date.now() + req.timeoutSec * 1000;
+    let ignoredDecisions = 0;
     while (Date.now() < deadline) {
       const pollSec = Math.min(25, Math.max(1, Math.ceil((deadline - Date.now()) / 1000)));
-      const res = await fetch(
+      const res = await this.fetchWithTimeout(
         this.url(
           `/api/decision?pairId=${encodeURIComponent(this.config.pairId)}` +
             `&requestId=${encodeURIComponent(requestId)}&timeoutSec=${pollSec}`
-        )
+        ),
+        {},
+        pollSec + 10
       );
       if (res.status === 204) continue;
       if (!res.ok) throw new Error(`Relay error while waiting (HTTP ${res.status}).`);
       const { payload } = (await res.json()) as { payload: any };
-      const decision = open<DecisionPayload>(this.key, payload, aadForDecision(requestId));
+      let decision: DecisionPayload;
+      try {
+        decision = open<DecisionPayload>(this.key, payload, aadForDecision(requestId));
+      } catch {
+        // Not sealed with our key: forged, or another party's noise. It is
+        // not an answer, so it must not end the wait — the real one may
+        // still arrive, and silence remains a refusal.
+        ignoredDecisions++;
+        await new Promise((r) => setTimeout(r, 500));
+        continue;
+      }
       if (decision.requestId !== requestId) continue; // belt and suspenders; AAD already binds it
       if (needsBiometric && decision.approved) {
         // Fail closed: an approval without a verifiable assertion is not
@@ -108,6 +134,12 @@ export class PwaApprover implements Approver {
         verifyAssertion(decision.assertion, this.config.biometric, requestId);
       }
       return { requestId, decision };
+    }
+    if (ignoredDecisions > 0) {
+      // Worth surfacing: someone was answering for you, and failing.
+      console.error(
+        `sandgate: ignored ${ignoredDecisions} unreadable decision(s) for this request.`
+      );
     }
     return null;
   }

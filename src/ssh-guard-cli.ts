@@ -34,19 +34,25 @@ export async function runSshGuard(
     case "test":
       return test(configPath);
     case "install":
-      console.log(installInstructions(configPath, binaryInvocation()));
-      return;
+      return install(configPath, arg === "--manual");
+    case "enforce":
+      return enforce(configPath, arg === "--yes");
+    case "uninstall":
+      return uninstall();
     case "doctor":
       return doctor(configPath);
     default:
       console.error(
         [
-          "Usage: sandgate ssh-guard <pair [name]|install|doctor|test|approve>",
-          "  pair     on your workstation: give this server a pairing of its own",
-          "  install  on the server: print the PAM and sshd lines to add",
-          "  doctor   on the server: check the wiring and your escape hatch",
-          "  test     on the server: send a fake login to your phone",
-          "  approve  called by PAM, not by you",
+          "Usage: sandgate ssh-guard <pair|install|test|enforce|doctor|uninstall|approve>",
+          "  pair [name]      on your workstation: give this server its own pairing",
+          "  install          on the server, as root: wire it up (notification mode)",
+          "  install --manual print the lines instead of applying them",
+          "  test             send a fake login to your phone",
+          "  enforce --yes    switch from notifying to actually blocking",
+          "  doctor           check the wiring and your escape hatch",
+          "  uninstall        remove everything it added",
+          "  approve          called by PAM, not by you",
         ].join("\n")
       );
       process.exit(1);
@@ -110,7 +116,9 @@ async function pair(
     serverName,
     exemptUsers: [] as string[],
     timeoutSec: 60,
-    failOpen: false,
+    // Notification mode to begin with: the first install must not be able
+    // to lock anyone out. `ssh-guard enforce` is the deliberate step.
+    failOpen: true,
   };
   const link = `${relayUrl}/#p=${pairing.pairId}&s=${pairing.secret}`;
   const qrcode = (await import("qrcode-terminal")).default;
@@ -138,6 +146,109 @@ async function pair(
       "3. Then, on the server: sandgate ssh-guard install",
     ].join("\n")
   );
+}
+
+async function install(configPath: string, manual: boolean): Promise<void> {
+  const {
+    installHook,
+    isRoot,
+  } = await import("./ssh-guard-install.js");
+
+  if (manual) {
+    console.log(installInstructions(configPath, binaryInvocation()));
+    return;
+  }
+  if (!isRoot()) {
+    console.error("Run this as root (sudo): it edits sshd's configuration.");
+    process.exit(1);
+  }
+  let config;
+  try {
+    config = loadGuardConfig(configPath);
+  } catch (err) {
+    console.error(String(err instanceof Error ? err.message : err));
+    process.exit(1);
+  }
+
+  const report = installHook(binaryInvocation());
+  for (const step of report.steps) console.log(`  ${step}`);
+  if (report.backups.length) {
+    console.log(`  backups: ${report.backups.join(", ")}`);
+  }
+  if (report.error) {
+    console.error(`
+${report.error}`);
+    process.exit(1);
+  }
+
+  const notifying = config.failOpen === true;
+  console.log(
+    [
+      "",
+      notifying
+        ? "Installed in NOTIFICATION mode: logins are announced on your phone and"
+        : "Installed in BLOCKING mode (failOpen is already false in your config).",
+      notifying
+        ? "an explicit Deny stops them, but silence still lets them through — so a"
+        : "Silence now refuses logins. Make sure you have an exempt user.",
+      notifying ? "mistake here cannot lock you out." : "",
+      "",
+      "Now, WITHOUT closing this session:",
+      "  1. sandgate ssh-guard test        (your phone should buzz)",
+      "  2. open a NEW ssh session         (it should ask, and let you in)",
+      notifying ? "  3. sandgate ssh-guard enforce --yes   (start actually blocking)" : "",
+      "",
+      "To undo everything: sandgate ssh-guard uninstall",
+    ]
+      .filter((line) => line !== "")
+      .join("\n")
+  );
+}
+
+async function enforce(configPath: string, confirmed: boolean): Promise<void> {
+  const config = loadGuardConfig(configPath);
+  if (config.failOpen !== true) {
+    console.log("Already blocking: silence refuses logins.");
+    return;
+  }
+  const hatch = (config.exemptUsers ?? []).length > 0;
+  if (!confirmed) {
+    console.log(
+      [
+        "This switches the guard from notifying to BLOCKING: a login with no",
+        "answer on your phone will be refused.",
+        "",
+        hatch
+          ? `Escape hatch in place: ${(config.exemptUsers ?? []).join(", ")}`
+          : 'NO ESCAPE HATCH. Add one first: "exemptUsers": ["rescue"] in ' + configPath,
+        "",
+        "Keep a second SSH session open, then rerun with --yes.",
+      ].join("\n")
+    );
+    process.exit(1);
+  }
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(configPath, JSON.stringify({ ...config, failOpen: false }, null, 2));
+  console.log(
+    "Blocking. Test a new login from another terminal now, while this session is still open."
+  );
+}
+
+async function uninstall(): Promise<void> {
+  const { uninstallHook, isRoot } = await import("./ssh-guard-install.js");
+  if (!isRoot()) {
+    console.error("Run this as root (sudo).");
+    process.exit(1);
+  }
+  const report = uninstallHook();
+  for (const step of report.steps) console.log(`  ${step}`);
+  if (report.backups.length) console.log(`  backups: ${report.backups.join(", ")}`);
+  if (report.error) {
+    console.error(`
+${report.error}`);
+    process.exit(1);
+  }
+  console.log("\nRemoved. Logins no longer ask for approval.");
 }
 
 async function test(configPath: string): Promise<void> {

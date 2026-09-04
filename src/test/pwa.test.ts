@@ -167,10 +167,13 @@ test("a relay cannot forge an approval (bad blob is rejected, request times out)
         await new Promise((r) => setTimeout(r, 50));
       }
     })();
-    await assert.rejects(
-      approver.request({ title: "Forgery target", timeoutSec: 3 }),
-      /authentication/
-    );
+    // Ignored, not fatal: a forged decision must not cancel the wait —
+    // otherwise anyone knowing the pair id could veto every approval.
+    // The request simply ends unanswered, which is a refusal.
+    assert.deepEqual(await approver.request({ title: "Forgery target", timeoutSec: 3 }), {
+      approved: false,
+      decision: "timeout",
+    });
     await evil;
   } finally {
     relay.close();

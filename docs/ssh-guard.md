@@ -36,33 +36,34 @@ It prints a link and a QR for your phone (add it with "+ add a vault", so
 the server shows up under its own name), then the JSON config to install
 on the server.
 
-**On the server:**
+**On the server — one command:**
 
 ```bash
 sudo install -d -m 700 /etc/sandgate
 sudo tee /etc/sandgate/ssh-guard.json > /dev/null   # paste, Ctrl-D
 sudo chmod 600 /etc/sandgate/ssh-guard.json
-sandgate ssh-guard install    # prints the exact lines to add
-sandgate ssh-guard doctor     # checks them, and your escape hatch
-sandgate ssh-guard test       # a fake login: your phone should buzz
+
+sudo sandgate ssh-guard install
 ```
 
-The two lines that matter:
+That single command edits `/etc/pam.d/sshd` and `/etc/ssh/sshd_config`,
+having first backed both up; if `sshd -t` rejects the result it puts
+everything back and refuses to reload. It is idempotent, and
+`sudo sandgate ssh-guard uninstall` removes exactly what it added.
 
+**It lands in notification mode**, so this first step cannot lock you
+out: logins are announced on your phone and an explicit Deny stops them,
+but silence still lets them through. Verify, then commit:
+
+```bash
+sandgate ssh-guard test              # your phone should buzz
+# open a NEW ssh session — it should ask, and let you in
+sandgate ssh-guard enforce --yes     # now silence refuses logins
 ```
-# /etc/pam.d/sshd — last auth line
-auth required pam_exec.so quiet /usr/bin/sandgate ssh-guard approve
 
-# /etc/ssh/sshd_config
-AuthenticationMethods publickey,keyboard-interactive:pam
-KbdInteractiveAuthentication yes
-UsePAM yes
-```
-
-**That second block is not optional.** Public-key logins skip the PAM
-auth stack entirely; without forcing `keyboard-interactive:pam`, your key
-sails straight past the guard and you will believe it works when it does
-not. `doctor` checks this explicitly.
+`enforce` refuses to run until you have an escape hatch. Prefer to see
+the lines before they are applied? `sandgate ssh-guard install --manual`
+prints them and touches nothing.
 
 ## Not locking yourself out
 
@@ -81,6 +82,8 @@ This is the real risk — the cryptography is the easy part.
   other.
 - Console access (your provider's web console, IPMI) bypasses sshd
   entirely — keep it working.
+- Keep `timeoutSec` below sshd's `LoginGraceTime` (120s by default), or
+  sshd hangs up before you have finished deciding.
 
 ## Options
 

@@ -44,6 +44,8 @@ const REQUEST_TTL_MS = 30 * 60 * 1000;
 const RATE_WINDOW_MS = 60 * 1000;
 const MAX_REQUESTS_PER_WINDOW = 12;
 const MAX_UNDECIDED = 5;
+/** Open event streams kept per pairing; a phone needs one, maybe two. */
+const MAX_LISTENERS = 8;
 
 export async function startRelay(opts: {
   port: number;

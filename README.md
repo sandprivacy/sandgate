@@ -96,9 +96,9 @@ anything that changes state still asks.
 ## Beyond agents: SSH logins that wait for your thumb
 
 ```bash
-sandgate ssh-guard pair vps-prod   # on your workstation
-sandgate ssh-guard install         # on the server: the PAM + sshd lines
-sandgate ssh-guard doctor          # checks the wiring and your escape hatch
+sandgate ssh-guard pair vps-prod    # on your workstation
+sudo sandgate ssh-guard install     # on the server: one command, backs up and self-checks
+sandgate ssh-guard enforce --yes    # once you have verified, start blocking
 ```
 
 An SSH login pauses until you approve it on your phone. Duo does this
