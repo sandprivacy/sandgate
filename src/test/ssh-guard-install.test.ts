@@ -173,3 +173,16 @@ test("the hook self-test passes with an environment as bare as PAM's", async () 
   assert.equal(typeof result.ok, "boolean");
   if (!result.ok) assert.ok(result.output.length > 0, "a failure must explain itself");
 });
+
+test("a compiled sandgate binary is the hook itself; node gets its script", async () => {
+  const { looksLikeNode } = await import("../ssh-guard-install.js");
+  // Node, wherever it lives.
+  assert.equal(looksLikeNode("/usr/bin/node"), true);
+  assert.equal(looksLikeNode("C:\Program Files\nodejs\node.exe"), true);
+  assert.equal(looksLikeNode("/home/u/.nvm/versions/node/v22.0.0/bin/node"), true);
+  // A standalone build from the release workflow: one file, no interpreter.
+  assert.equal(looksLikeNode("/usr/local/bin/sandgate"), false);
+  assert.equal(looksLikeNode("/usr/local/bin/sandgate-linux-x64"), false);
+  // Not fooled by a directory named node.
+  assert.equal(looksLikeNode("/opt/node/sandgate"), false);
+});

@@ -4,6 +4,11 @@ name: Release
 #   git tag v0.2.1 && git push origin v0.2.1
 # Requires the NPM_TOKEN repository secret: a granular automation token
 # scoped to @sandprivacy with publish rights and 2FA bypass.
+#
+# A second job builds standalone Linux binaries (no Node needed on the
+# server, one file under /usr/local/bin) and attaches them to the GitHub
+# release. It is independent of the npm publish: a binary build failure
+# never blocks the package.
 on:
   push:
     tags: ["v*"]
@@ -32,3 +37,38 @@ jobs:
       - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  binaries:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        target: [bun-linux-x64, bun-linux-arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: npm ci
+      - run: npm run build
+      - name: Compile
+        run: |
+          ARCH="${{ matrix.target }}"
+          ARCH="${ARCH#bun-linux-}"
+          bun build ./dist/index.js --compile --target=${{ matrix.target }} --outfile "sandgate-linux-$ARCH"
+          ./sandgate-linux-$ARCH --help >/dev/null 2>&1 || [ "$ARCH" != "x64" ]
+      - name: Smoke test the binary as the PAM hook would run it
+        if: matrix.target == 'bun-linux-x64'
+        run: |
+          # The account phase returns before any network call: this only
+          # proves the binary starts with an empty environment, which is
+          # exactly what pam_exec gives it.
+          env -i PAM_TYPE=account PAM_USER=ci PAM_RHOST=ci ./sandgate-linux-x64 ssh-guard approve
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: sandgate-linux-*

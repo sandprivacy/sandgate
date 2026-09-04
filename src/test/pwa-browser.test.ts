@@ -285,3 +285,39 @@ test("a one-time pairing link pairs once, names the vault, then dies", async () 
     relay.close();
   }
 });
+
+test("the app offers to scan a pairing code when it has a camera", async () => {
+  const relay = await startRelay({
+    port: 0,
+    stateDir: mkdtempSync(join(tmpdir(), "sandgate-relay-")),
+  });
+  const relayUrl = `http://localhost:${relay.port}`;
+  try {
+    const { window, close } = await loadPage(relayUrl, {
+      beforeScript: (w) => {
+        Object.defineProperty(w.navigator, "mediaDevices", {
+          configurable: true,
+          value: { getUserMedia: async () => ({ getTracks: () => [] }) },
+        });
+      },
+    });
+    try {
+      const buttons = [...window.document.querySelectorAll("button")].map((b: any) => b.textContent);
+      assert.ok(buttons.includes("Scan a QR code"), `expected a scan button, got ${buttons.join(", ")}`);
+
+      // What a scan hands over is exactly what a paste would: a link.
+      const { newClaimSecret, sealClaim, publishClaim, pairingLink } = await import("../pwacrypto.js");
+      const pairing = newPairing();
+      const claim = newClaimSecret();
+      await publishClaim(relayUrl, pairing.pairId, sealClaim(claim, pairing.pairId, { secret: pairing.secret, name: "scanned" }));
+      const added = await window.sandgate.takePairingText(pairingLink(relayUrl, pairing.pairId, claim, "scanned"));
+      assert.equal(added, true);
+      const stored = JSON.parse(window.localStorage.getItem("sandgate_pairs"));
+      assert.deepEqual(stored, [{ name: "scanned", pairId: pairing.pairId, secret: pairing.secret }]);
+    } finally {
+      close();
+    }
+  } finally {
+    relay.close();
+  }
+});

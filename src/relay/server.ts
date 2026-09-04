@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import webpush from "web-push";
 import { PWA_HTML, PWA_SW, pwaManifest } from "./pwa-page.js";
 import { ICON_SVG, iconPng } from "./icons.js";
@@ -57,6 +58,28 @@ const MAX_UNDECIDED = 5;
 /** Open event streams kept per pairing; a phone needs one, maybe two. */
 const MAX_LISTENERS = 8;
 
+/**
+ * Per-address limit, on top of the per-pairing one: the pairing limit
+ * does nothing against invented pair ids. A phone polls every few
+ * seconds and a gateway long-polls every 25s, so this is generous for
+ * anyone real and a wall for a loop.
+ */
+const IP_WINDOW_MS = 60 * 1000;
+const MAX_PER_IP = 240;
+
+/**
+ * The QR decoder the app loads on demand for "scan a pairing code".
+ * Served from our own origin (no CDN, no CSP surprises); absent from the
+ * bundle it simply is not offered.
+ */
+const require = createRequire(import.meta.url);
+let JSQR_JS: string | null = null;
+try {
+  JSQR_JS = readFileSync(require.resolve("jsqr/dist/jsQR.js"), "utf8");
+} catch {
+  JSQR_JS = null;
+}
+
 export async function startRelay(opts: {
   port: number;
   stateDir: string;
@@ -83,6 +106,40 @@ export async function startRelay(opts: {
   // qualifies); use a real https URL and log delivery failures instead of
   // swallowing them.
   webpush.setVapidDetails("https://sandgate.dev", state.vapid.publicKey, state.vapid.privateKey);
+
+  // Counters for /api/metrics. Nothing per user, nothing that identifies
+  // anyone — enough to see the relay breathe, and to see it choke.
+  const metrics = {
+    requests: 0,
+    decisions: 0,
+    pushSent: 0,
+    pushFailed: 0,
+    claimsIssued: 0,
+    claimsCollected: 0,
+    rateLimited: 0,
+  };
+
+  const ipHits = new Map<string, number[]>();
+  const clientIp = (req: IncomingMessage): string => {
+    // Behind nginx (the documented deployment) the socket address is the
+    // proxy's; the first X-Forwarded-For hop is the caller.
+    const xff = req.headers["x-forwarded-for"];
+    if (typeof xff === "string" && xff.trim()) return xff.split(",")[0]!.trim();
+    return req.socket.remoteAddress ?? "?";
+  };
+  const ipLimited = (req: IncomingMessage): boolean => {
+    const ip = clientIp(req);
+    const now = Date.now();
+    const hits = (ipHits.get(ip) ?? []).filter((t) => now - t < IP_WINDOW_MS);
+    if (hits.length >= MAX_PER_IP) {
+      ipHits.set(ip, hits);
+      metrics.rateLimited++;
+      return true;
+    }
+    hits.push(now);
+    ipHits.set(ip, hits);
+    return false;
+  };
 
   const pairings = new Map<string, Pairing>();
   const getPairing = (pairId: string): Pairing => {
@@ -113,6 +170,12 @@ export async function startRelay(opts: {
         if (entry.ts < cutoff) p.requests.delete(id);
       }
       if (p.claim && p.claim.ts < claimCutoff) p.claim = undefined;
+    }
+    const ipCutoff = Date.now() - IP_WINDOW_MS;
+    for (const [ip, hits] of ipHits) {
+      const live = hits.filter((t) => t > ipCutoff);
+      if (live.length) ipHits.set(ip, live);
+      else ipHits.delete(ip);
     }
   }, Math.min(60_000, claimTtl));
   gc.unref();
@@ -174,6 +237,14 @@ export async function startRelay(opts: {
         res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "max-age=86400" });
         return res.end(ICON_SVG);
       }
+      if (req.method === "GET" && url.pathname === "/jsqr.js") {
+        if (!JSQR_JS) return json(res, 404, { error: "QR decoder not bundled" });
+        res.writeHead(200, {
+          "Content-Type": "application/javascript",
+          "Cache-Control": "max-age=86400",
+        });
+        return res.end(JSQR_JS);
+      }
       const iconMatch = url.pathname.match(/^\/icon-(180|192|512)\.png$/);
       if (req.method === "GET" && iconMatch) {
         res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "max-age=86400" });
@@ -181,6 +252,42 @@ export async function startRelay(opts: {
       }
 
       // --- API ---
+      if (req.method === "GET" && url.pathname === "/api/metrics") {
+        let activeRequests = 0;
+        for (const p of pairings.values()) {
+          for (const e of p.requests.values()) if (e.decision === undefined) activeRequests++;
+        }
+        const lines = [
+          "# TYPE sandgate_relay_requests_total counter",
+          `sandgate_relay_requests_total ${metrics.requests}`,
+          "# TYPE sandgate_relay_decisions_total counter",
+          `sandgate_relay_decisions_total ${metrics.decisions}`,
+          "# TYPE sandgate_relay_push_sent_total counter",
+          `sandgate_relay_push_sent_total ${metrics.pushSent}`,
+          "# TYPE sandgate_relay_push_failed_total counter",
+          `sandgate_relay_push_failed_total ${metrics.pushFailed}`,
+          "# TYPE sandgate_relay_claims_issued_total counter",
+          `sandgate_relay_claims_issued_total ${metrics.claimsIssued}`,
+          "# TYPE sandgate_relay_claims_collected_total counter",
+          `sandgate_relay_claims_collected_total ${metrics.claimsCollected}`,
+          "# TYPE sandgate_relay_rate_limited_total counter",
+          `sandgate_relay_rate_limited_total ${metrics.rateLimited}`,
+          "# TYPE sandgate_relay_active_requests gauge",
+          `sandgate_relay_active_requests ${activeRequests}`,
+          "# TYPE sandgate_relay_pairings gauge",
+          `sandgate_relay_pairings ${Object.keys(state.subscriptions).length}`,
+          "# TYPE sandgate_relay_uptime_seconds gauge",
+          `sandgate_relay_uptime_seconds ${Math.round(process.uptime())}`,
+          "",
+        ];
+        res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4" });
+        return res.end(lines.join("\n"));
+      }
+      if (url.pathname.startsWith("/api/") && url.pathname !== "/api/health" && url.pathname !== "/api/events") {
+        if (ipLimited(req)) {
+          return json(res, 429, { error: "Too many requests from this address. Slow down." });
+        }
+      }
       if (req.method === "GET" && url.pathname === "/api/health") {
         let activeRequests = 0;
         for (const p of pairings.values()) {
@@ -239,6 +346,7 @@ export async function startRelay(opts: {
         }
         const pairing = getPairing(body.pairId);
         pairing.claim = { payload: body.payload, ts: Date.now() };
+        metrics.claimsIssued++;
         return json(res, 200, { ok: true });
       }
       if (req.method === "GET" && url.pathname === "/api/claim") {
@@ -254,6 +362,7 @@ export async function startRelay(opts: {
         const payload = pairing.claim!.payload;
         pairing.claim = undefined;
         pairing.claimedAt = Date.now();
+        metrics.claimsCollected++;
         return json(res, 200, { payload });
       }
 
@@ -278,6 +387,7 @@ export async function startRelay(opts: {
           });
         }
         pairing.recent.push(now);
+        metrics.requests++;
 
         pairing.requests.set(body.requestId, {
           requestId: body.requestId,
@@ -300,7 +410,11 @@ export async function startRelay(opts: {
                 payload: body.payload,
               })
             )
+            .then(() => {
+              metrics.pushSent++;
+            })
             .catch((err: any) => {
+              metrics.pushFailed++;
               // Phone offline / stale sub is normal (PWA polls anyway), but
               // ops must be able to SEE a push service rejecting us.
               console.error(
@@ -365,6 +479,7 @@ export async function startRelay(opts: {
         const entry = getPairing(body.pairId).requests.get(body.requestId);
         if (!entry) return json(res, 404, { error: "unknown request" });
         if (entry.decision !== undefined) return json(res, 200, { ok: true }); // first tap wins
+        metrics.decisions++;
         entry.decision = body.payload;
         for (const waiter of entry.waiters.splice(0)) waiter(body.payload);
         notifyListeners(getPairing(body.pairId), "decision");

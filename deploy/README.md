@@ -54,6 +54,20 @@ sudo useradd -r -m -d /var/lib/sandgate sandgate
 sudo systemctl enable --now sandgate-relay
 ```
 
+## Watching it
+
+- `GET /api/health` — `{ok, uptime_sec, pairings, active_requests}` for an uptime check.
+- `GET /api/metrics` — Prometheus text: requests, decisions, push sent/failed, claims issued/collected, rate-limited calls, active requests, pairings. Nothing per user.
+- Rate limits: 12 requests/min and 5 undecided per pairing (against flooding a phone), 240 API calls/min per client address (against invented pair ids). Behind a proxy the first `X-Forwarded-For` hop is the client.
+
+## Backing it up
+
+`relay-state.json` holds the VAPID key pair and every push subscription. Lose it and every phone must re-run `sandgate pair` (and, for servers, `ssh-guard pair`); nothing else is lost. Copy it with the rest of the host's backups, mode 0600:
+
+```bash
+cp /var/lib/sandgate/relay/relay-state.json /backup/sandgate-relay-state.json
+```
+
 ## Notes
 
 - The relay sees only sealed blobs (see "Security notes" in the main README); hosting it does not give the host access to any request content or decision.

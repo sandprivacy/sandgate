@@ -364,6 +364,15 @@ export const PWA_HTML = `<!doctype html>
   }
   .answer-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   .answer-input:disabled { opacity: .5; }
+  .scan {
+    position: fixed; inset: 0; z-index: 20;
+    background: #000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; padding: 20px;
+  }
+  .scan video { width: 100%; max-height: 70vh; border-radius: 12px; object-fit: cover; }
+  .scan p { color: var(--soft); font-size: 14px; text-align: center; margin: 0; }
+  .scan button.no { min-width: 140px; }
 </style>
 </head>
 <body>
@@ -507,7 +516,80 @@ export const PWA_HTML = `<!doctype html>
     if (parsed.claim) parsed = await resolveClaim(parsed);
     return addPairing(parsed);
   }
-  window.sandgate = { acceptPairingText: acceptPairingText, parsePairing: parsePairing };
+  function loadJsQr() {
+    return new Promise(function (resolve, reject) {
+      if (window.jsQR) return resolve(window.jsQR);
+      var el = document.createElement("script");
+      el.src = "/jsqr.js";
+      el.onload = function () { window.jsQR ? resolve(window.jsQR) : reject(new Error("QR decoder did not load")); };
+      el.onerror = function () { reject(new Error("QR decoder did not load")); };
+      document.head.appendChild(el);
+    });
+  }
+  /** Open the camera and hand back the first pairing link it sees. */
+  async function scanPairing(onText) {
+    var overlay = document.createElement("div");
+    overlay.className = "scan";
+    overlay.innerHTML =
+      '<video playsinline autoplay muted></video>' +
+      '<p>Point the camera at the QR code printed by sandgate pair</p>' +
+      '<button class="no"><span>Cancel</span></button>';
+    document.body.appendChild(overlay);
+    var video = overlay.querySelector("video");
+    var stream = null;
+    function stop() {
+      if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+      overlay.remove();
+    }
+    overlay.querySelector("button").onclick = stop;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      video.srcObject = stream;
+      await video.play();
+      var detector = ("BarcodeDetector" in window) ? new BarcodeDetector({ formats: ["qr_code"] }) : null;
+      var jsqr = detector ? null : await loadJsQr();
+      var canvas = document.createElement("canvas");
+      var ctx = canvas.getContext("2d", { willReadFrequently: true });
+      var tick = async function () {
+        if (!overlay.isConnected) return;
+        var text = null;
+        try {
+          if (detector) {
+            var codes = await detector.detect(video);
+            if (codes.length) text = codes[0].rawValue;
+          } else if (video.videoWidth) {
+            canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0);
+            var img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            var code = jsqr(img.data, img.width, img.height);
+            if (code) text = code.data;
+          }
+        } catch (e) {}
+        if (text && parsePairing(text)) { stop(); onText(text); return; }
+        requestAnimationFrame(tick);
+      };
+      tick();
+    } catch (err) {
+      stop();
+      alert("Camera unavailable: " + (err && err.message ? err.message : err) + "\\n\\nPaste the link instead.");
+    }
+  }
+  /** What a scanned or pasted link leads to: add the vault, start over paired. */
+  function takePairingText(text) {
+    return acceptPairingText(text).then(function (added) {
+      if (added) location.reload();
+      return added;
+    }).catch(function (err) { alert(err && err.message ? err.message : err); return false; });
+  }
+  function makeScanButton() {
+    var b = document.createElement("button");
+    b.className = "ok";
+    b.style.marginTop = "12px";
+    b.innerHTML = "<span>Scan a QR code</span>";
+    b.onclick = function () { scanPairing(takePairingText); };
+    return b;
+  }
+  window.sandgate = { acceptPairingText: acceptPairingText, parsePairing: parsePairing, takePairingText: takePairingText };
   var candidate = parsePairing(location.hash);
   if (candidate && candidate.claim) {
     // A claim needs the network: collect it, then start over paired.
@@ -543,8 +625,9 @@ export const PWA_HTML = `<!doctype html>
       '<div class="mark">' + GLYPH + '</div>' +
       '<p>Not paired yet. On your computer, run</p><code>sandgate pair</code>' +
       '<p style="margin-top:14px">then open the link it prints on this device —<br>or paste it here:</p>' +
-      '<input id="pasteLink" placeholder="https://relay…/#p=…&s=…" autocomplete="off">';
+      '<input id="pasteLink" placeholder="https://relay…/#p=…&c=…" autocomplete="off">';
     listEl.appendChild(setup);
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) setup.appendChild(makeScanButton());
     document.getElementById("pasteLink").addEventListener("input", function (e) {
       if (!parsePairing(e.target.value)) return;
       acceptPairingText(e.target.value).then(function (added) {
@@ -1137,6 +1220,7 @@ export const PWA_HTML = `<!doctype html>
         }).catch(function (err) { alert(err && err.message ? err.message : err); });
       });
       section.appendChild(input);
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) section.appendChild(makeScanButton());
       input.focus();
     };
     addRow.appendChild(add);

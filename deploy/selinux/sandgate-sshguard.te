@@ -1,0 +1,43 @@
+module sandgate-sshguard 1.0;
+
+# SELinux policy for `sandgate ssh-guard` on RHEL / Rocky / Alma / Fedora.
+#
+# During authentication sshd runs in sshd_t. The hook it executes through
+# pam_exec is Node (or the standalone sandgate binary) which must then
+# open an HTTPS connection to the relay and keep a small decision cache
+# under /tmp. The default policy denies all three. This module allows
+# exactly those, and nothing else.
+#
+# UNTESTED on a real enforcing system at the time of writing: read the
+# AVC denials on yours (`ausearch -m avc -ts recent`) and extend as
+# needed. Install with install.sh alongside this file.
+
+require {
+    type sshd_t;
+    type bin_t;
+    type usr_t;
+    type lib_t;
+    type http_port_t;
+    type tmp_t;
+    type etc_t;
+    type admin_home_t;
+    class file { read open getattr execute execute_no_trans map create write append unlink };
+    class dir { search read getattr add_name write remove_name create };
+    class tcp_socket { name_connect };
+}
+
+# Run the interpreter / binary in sshd's own domain (no transition).
+allow sshd_t bin_t:file { read open getattr execute execute_no_trans map };
+# Read the installed package (usually /usr/local/lib/node_modules).
+allow sshd_t usr_t:file { read open getattr map };
+allow sshd_t usr_t:dir { search read getattr };
+allow sshd_t lib_t:file { read open getattr map };
+# Talk to the relay over HTTPS.
+allow sshd_t http_port_t:tcp_socket name_connect;
+# The per-login decision cache: /tmp/sandgate-ssh.
+allow sshd_t tmp_t:dir { search read getattr add_name write remove_name create };
+allow sshd_t tmp_t:file { read open getattr create write unlink };
+# The audit trail under root's home. Optional: a denial here is caught by
+# the hook and never affects the login decision.
+allow sshd_t admin_home_t:dir { search add_name write create };
+allow sshd_t admin_home_t:file { read open getattr create write append };

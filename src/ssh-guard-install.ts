@@ -208,8 +208,20 @@ export function reloadSshd(): { ok: boolean; output: string } {
  * "command not found", which pam_exec reports as failure — and every
  * login is refused. This locked a real server out during testing.
  */
+/** Is this program Node itself, or a compiled sandgate binary? */
+export function looksLikeNode(executable: string): boolean {
+  return /(^|[\\/])node(\.exe)?$/i.test(executable);
+}
+
 export function hookCommand(): { argv: string[]; display: string } {
   const node = process.execPath;
+  // A standalone binary (see the release workflow) IS the program: no
+  // interpreter, no script. Node is recognisable by name; anything else
+  // that is running this code is a compiled sandgate.
+  if (!looksLikeNode(node)) {
+    const argv = [node, "ssh-guard", "approve"];
+    return { argv, display: argv.join(" ") };
+  }
   const entry = process.argv[1];
   let script: string | null = null;
   if (entry) {
@@ -247,6 +259,19 @@ export function hookRunsUnderPam(argv: string[]): { ok: boolean; output: string 
       output: String(err?.stderr || err?.message || err).slice(0, 300),
     };
   }
+}
+
+/**
+ * SELinux in enforcing mode is the one thing on RHEL-family systems that
+ * silently defeats this whole setup: sshd's domain is not allowed to run
+ * an interpreter and open a network connection during authentication.
+ * The install still validates, sshd still reloads, and every login then
+ * fails — or passes, in notification mode — with the reason only in
+ * audit.log. Say so at install time, and point at the policy.
+ */
+export function selinuxEnforcing(): boolean {
+  const result = run("getenforce", []);
+  return result.ok && result.output.trim() === "Enforcing";
 }
 
 export interface InstallReport {
@@ -350,6 +375,12 @@ ${selfTest.output}`;
     return report;
   }
   report.steps.push("the hook runs under PAM's environment");
+  if (selinuxEnforcing()) {
+    report.steps.push(
+      "SELinux is ENFORCING: sshd may be denied running the hook or reaching the relay. " +
+        "Install the policy in deploy/selinux/ and watch: ausearch -m avc -ts recent"
+    );
+  }
 
   const reloaded = reloadSshd();
   report.steps.push(reloaded.ok ? "sshd reloaded" : `WARNING: ${reloaded.output}`);
