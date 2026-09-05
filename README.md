@@ -31,10 +31,16 @@ Agents stall on everything that needs a human: TOTP prompts, verification emails
 
 ```bash
 npm install -g @sandprivacy/sandgate
-sandgate init                          # vault passphrase + Telegram bot + inbox backend
+sandgate init                          # vault passphrase (Telegram and inbox are optional)
+sandgate pair                          # scan the QR with the sandgate app on your phone
 sandgate add-totp github.com JBSWY3DPEHPK3PXP
-sandgate test-approval                 # your phone should buzz
+sandgate test-approval                 # your phone buzzes; approve from the lock screen
 ```
+
+No server to set up: `pair` uses the hosted relay by default, which
+forwards sealed blobs it cannot read — [what it sees and what it
+cannot](https://sandgate.dev/relay). Prefer your own? `sandgate relay`
+runs one, and `SANDGATE_RELAY=<url>` makes it the default.
 
 Register it with your agent (Claude Code shown; any MCP client works):
 
@@ -160,11 +166,11 @@ sandgate policy mybank.com deny      # never
 
 ## The PWA approval channel (E2EE)
 
-Telegram is the quick start; the PWA is the destination. Run your own relay and pair your phone:
+The phone app is the channel; Telegram remains as a fallback. Pairing takes one command:
 
 ```bash
-sandgate relay                    # serves the PWA + forwards sealed blobs (port 8787)
-sandgate pair https://your-relay  # prints a link + QR — open it on your phone
+sandgate pair                     # hosted relay (relay.sandgate.dev)
+sandgate pair https://your-relay  # or your own: `sandgate relay` serves the app and forwards blobs
 ```
 
 How the trust works: the link carries a **one-time claim**, not the secret. The gateway seals the channel secret under the claim and parks it on the relay, which hands it out once and forgets it after ten minutes — the link is dead after use, and the secret itself only ever lives in the URL **fragment** on the phone, never on a server. Both ends derive an AES-256-GCM key (HKDF); every approval request and every tap is sealed with the request id bound into the AAD. The relay stores and forwards blobs it cannot read, and cannot forge — a malicious relay can at worst drop or delay an answer, which is just a deny. A real phone needs the relay behind TLS (service workers require it); `http://localhost:8787` works for a desktop-browser test.

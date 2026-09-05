@@ -37,8 +37,8 @@ Usage:
   sandgate connect-telegram <bot-token>  Connect (or fix) the Telegram approval channel
   sandgate connect-slack <bot> <app> <#ch> Approvals in a Slack channel (teams; Node 22+)
   sandgate channel [phone|slack|telegram] Show or choose where requests go
-  sandgate relay [port]                  Run the approval relay (serves the phone PWA)
-  sandgate pair <relay-url>              Pair your phone via the relay (E2EE, replaces Telegram)
+  sandgate relay [port]                  Run your own relay (optional; serves the phone PWA)
+  sandgate pair [relay-url]              Pair your phone (E2EE); hosted relay by default, or yours
   sandgate add-device                    Add another phone to the current pairing
   sandgate unpair                        Revoke the phone channel entirely
   sandgate pairings                      List what is paired (phone, ssh-guard servers) and its state
@@ -582,14 +582,10 @@ async function waitForPhone(relayUrl: string, pairId: string, seconds = 120): Pr
   );
 }
 
-async function cmdPair(relayUrl?: string): Promise<void> {
-  if (!relayUrl) {
-    console.error(
-      "Usage: sandgate pair <relay-url>\n" +
-        "Run `sandgate relay` first (behind TLS for a real phone; http://localhost:8787 works for a desktop browser test)."
-    );
-    process.exit(1);
-  }
+async function cmdPair(relayArg?: string): Promise<void> {
+  const { resolveRelayUrl, HOSTED_RELAY_NOTICE } = await import("./relay-default.js");
+  const relay = resolveRelayUrl(relayArg);
+  if (relay.source === "hosted") console.log(HOSTED_RELAY_NOTICE + String.fromCharCode(10));
   const prompter = new Prompter();
   const pass = await getPassphrase(prompter);
   prompter.close();
@@ -597,7 +593,7 @@ async function cmdPair(relayUrl?: string): Promise<void> {
 
   const { newPairing } = await import("./pwacrypto.js");
   const pairing = newPairing();
-  const base = relayUrl.replace(/\/$/, "");
+  const base = relay.url;
   if (data.pwa) {
     console.log(
       "Replacing the existing pairing: every device that had the old one stops receiving anything.\n" +

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The hosted relay — sandgate</title>
+<meta name="description" content="What relay.sandgate.dev sees, what it cannot, and how to run your own.">
+<link rel="icon" href="https://relay.sandgate.dev/icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --ground: #141210; --panel: #1e1b16; --panel-raised: #262219; --line: #35301f;
+    --ink: #efe9db; --soft: #a69c85; --accent: #d9a441; --ok: #3f9169; --no: #c2563e;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--ink); font: 16px/1.65 -apple-system, "Segoe UI", Roboto, system-ui, sans-serif; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  code, pre { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 24px 60px; }
+  nav { display: flex; align-items: center; gap: 12px; padding: 22px 0; }
+  .mark { color: var(--accent); display: grid; place-items: center; }
+  nav .name { font-weight: 800; font-size: 18px; }
+  nav .links { margin-left: auto; display: flex; gap: 22px; font-size: 14.5px; }
+  nav .links a { color: var(--soft); } nav .links a:hover { color: var(--ink); text-decoration: none; }
+  h1 { font-size: 34px; line-height: 1.15; margin: 30px 0 8px; }
+  .lede { color: var(--soft); font-size: 17px; margin: 0 0 30px; }
+  h2 { font-size: 20px; margin: 34px 0 10px; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 640px) { .cols { grid-template-columns: 1fr; } }
+  .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .box h3 { margin: 0 0 8px; font-size: 14px; letter-spacing: .06em; text-transform: uppercase; }
+  .box.sees h3 { color: var(--accent); } .box.blind h3 { color: var(--ok); }
+  .box ul { margin: 0; padding-left: 18px; } .box li { margin: 4px 0; }
+  pre { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; overflow-x: auto; font-size: 14px; }
+  p.note { color: var(--soft); font-size: 14.5px; }
+  footer { margin-top: 50px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--soft); font-size: 13.5px; display: flex; gap: 16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <span class="mark"><svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4.32" y="6.24" width="15.36" height="1.92" rx="0.6"/><rect x="6.24" y="10.08" width="11.52" height="1.44" rx="0.6"/><rect x="7.2" y="8.16" width="1.92" height="10.56" rx="0.6"/><rect x="14.88" y="8.16" width="1.92" height="10.56" rx="0.6"/></svg></span>
+    <span class="name"><a href="/" style="color:inherit">sandgate</a></span>
+    <span class="links">
+      <a href="https://github.com/sandprivacy/sandgate#readme">Docs</a>
+      <a href="https://github.com/sandprivacy/sandgate">GitHub</a>
+    </span>
+  </nav>
+
+  <h1>The hosted relay</h1>
+  <p class="lede"><code>relay.sandgate.dev</code> is what <code>sandgate pair</code> uses when you give it nothing else. It exists so that the first approval takes a QR scan, not a server. Here is exactly what it is.</p>
+
+  <div class="cols">
+    <div class="box sees">
+      <h3>What it sees</h3>
+      <ul>
+        <li>Pairing ids — 128-bit random strings</li>
+        <li>Sealed blobs: requests and decisions, AES-256-GCM, keys it never holds</li>
+        <li>Your IP address, like any server you connect to</li>
+        <li>Your phone's push endpoint, so it can wake the app</li>
+        <li>How many devices a quorum needs (the number, nothing else)</li>
+      </ul>
+    </div>
+    <div class="box blind">
+      <h3>What it cannot see or do</h3>
+      <ul>
+        <li>What is being asked, or what you answered</li>
+        <li>Any 2FA seed, code, password or key</li>
+        <li>Forge an approval — every decision is authenticated to your pairing key</li>
+        <li>Replay a decision onto another request — the request id is bound into the ciphertext</li>
+        <li>Produce a Face ID assertion</li>
+      </ul>
+    </div>
+  </div>
+
+  <p class="note">The worst a hostile relay can do is drop or delay an answer, and sandgate treats that as a refusal. This is not a promise: it is how the code is written, and <a href="https://github.com/sandprivacy/sandgate/blob/master/src/test/pwa.test.ts">the tests in the repo</a> check it on every commit.</p>
+
+  <h2>What you should know</h2>
+  <ul>
+    <li><strong>No SLA.</strong> It runs on one server, kept up with care and monitored, but if it is down your agents will wait and then refuse — safe, not available. Anything that matters should be able to fall back to your own relay.</li>
+    <li><strong>Limits.</strong> 12 requests a minute and 5 unanswered per pairing (against flooding a phone), 240 API calls a minute per address (against abuse). Ordinary use never sees them.</li>
+    <li><strong>Data kept.</strong> Push endpoints, until you unpair. Requests, for 30 minutes at most, then dropped. IP addresses are not logged beyond what the web server needs to run; nothing is sold, shared or analysed.</li>
+    <li><strong>Pairing links</strong> are one-time claims that expire in ten minutes; the relay hands the sealed secret out once and forgets it.</li>
+  </ul>
+
+  <h2>Run your own instead</h2>
+  <p>Same code, one command, behind any TLS terminator (phones require HTTPS for push):</p>
+<pre>npm i -g @sandprivacy/sandgate
+sandgate relay 8787                       # put Caddy, nginx or a Cloudflare Tunnel in front
+export SANDGATE_RELAY=https://relay.your.domain
+sandgate pair                             # now pairs against yours, for good</pre>
+  <p class="note">Details, systemd unit, metrics and backup: <a href="https://github.com/sandprivacy/sandgate/blob/master/deploy/README.md">deploy/README.md</a>.</p>
+
+  <footer>
+    <span>AGPL-3.0 · part of the sandprivacy suite</span>
+    <span style="margin-left:auto"></span>
+    <a href="https://github.com/sandprivacy/sandgate/blob/master/SECURITY.md">Security</a>
+  </footer>
+</div>
+</body>
+</html>
