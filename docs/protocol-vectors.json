@@ -1,0 +1,58 @@
+{
+  "note": "Test vectors for any sandgate client. Verify HKDF, AES-256-GCM and the AADs against these before writing a line of UI.",
+  "hkdf": {
+    "hash": "SHA-256",
+    "salt": "sandgate-pwa-v1",
+    "infoChannel": "approval-channel",
+    "infoClaim": "pairing-claim",
+    "keyBytes": 32
+  },
+  "channel": {
+    "secret": "aGVsbG8td29ybGQtdGhpcy1pcy0zMi1ieXRlcy1vaw",
+    "derivedKeyHex": "2f32635fe39acdd7bd2fe41d13bb1559f3c82b33e09911403d6a2e7ae2a34c81",
+    "requestId": "req-vector-000000001",
+    "aadRequest": "req:req-vector-000000001",
+    "aadDecision": "dec:req-vector-000000001",
+    "sealedRequest": {
+      "iv": "OCr_LwVVlkoLg9jb",
+      "ct": "x11vs0fdzItX1F4_TxMiHy8J9ICYfEspB5R446hYPJy1dQz-FnW_UhQaEFRYeJYYYEQTi7A-EXYI5Rhm4dbOneBIxGpcbPLE3z5A22rJu6SLG1jhlRY_B8j7RGnPy54QKvuMuSiTUJWRxDbHdwOjPfVHoYQfDmif--3aQ942bHucv6E6flTA6ej9hCilRrG-Fh1eHYDrjNdIMKtrxkw"
+    },
+    "requestPlaintext": {
+      "kind": "approval",
+      "title": "Pay invoice #1042",
+      "body": "$42.00 to ACME",
+      "timeoutSec": 60,
+      "ts": 1757030400000,
+      "requireBiometric": false,
+      "quorum": 1
+    },
+    "sealedDecision": {
+      "iv": "tNN3dlMqenhMAbgN",
+      "ct": "6dQkSd0l_j0LipvjFMOYb0ieyRSMjdvKa1u0lTUkffe7lyaE_fHFNF-KewYH_4oMmRutRprgaYRwq4bCKG9cT1UwZkT5hGtZQ8ohI88sjlknC3YVPAkhXhvhuI6WW_UwCyogqmCrkYY9NCcXdPE_IvGe_b0"
+    },
+    "decisionPlaintext": {
+      "requestId": "req-vector-000000001",
+      "approved": true,
+      "ts": 1757030410000,
+      "deviceId": "device-vector-1"
+    }
+  },
+  "claim": {
+    "pairId": "sandgateProtocolV1",
+    "claimSecret": "Y2xhaW0tc2VjcmV0LXZlY3Rvci0zMi1ieXRlcy1vaw",
+    "derivedKeyHex": "73b7fc284a10774000b6446d5876a5c2e0fd5920f7beb695689901f9133b4877",
+    "aad": "claim:sandgateProtocolV1",
+    "sealedClaim": {
+      "iv": "2j-94v4gpzSu2GTr",
+      "ct": "CzHnh3GJjoYOpMHTbM041gEWMwYxcIVsbWQAbADJqqXj81VFuCd7Ft220dBtCa6kvhJ7YfOwTZ17Y0fmoRD931W-OZ1NGrwTdPU6epVcor3aDMjJvrKN"
+    },
+    "claimPlaintext": {
+      "secret": "aGVsbG8td29ybGQtdGhpcy1pcy0zMi1ieXRlcy1vaw",
+      "name": "laptop"
+    }
+  },
+  "webauthn": {
+    "challengeInput": "sandgate-webauthn-v1:req-vector-000000001",
+    "challengeBase64url": "s6A-PtfWyCB1KLR8CyFfk0EC8yWdcZ-v9zhcxo9YnH0"
+  }
+}

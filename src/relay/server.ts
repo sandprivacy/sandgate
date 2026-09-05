@@ -259,6 +259,21 @@ export async function startRelay(opts: {
         res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "max-age=86400" });
         return res.end(ICON_SVG);
       }
+      // Apple's associated-domains file. A native app can only use the
+      // passkeys already registered for this relay's domain if Apple can
+      // read this — which is what lets the iOS app produce assertions the
+      // gateway verifies with no second code path. Set SANDGATE_APPLE_APP
+      // to "<TEAMID>.<bundle id>"; absent, the endpoint simply is not there.
+      if (req.method === "GET" && url.pathname === "/.well-known/apple-app-site-association") {
+        const apps = (process.env.SANDGATE_APPLE_APP ?? "")
+          .split(",")
+          .map((a) => a.trim())
+          .filter(Boolean);
+        if (!apps.length) return json(res, 404, { error: "no associated app configured" });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ webcredentials: { apps } }));
+      }
+
       if (req.method === "GET" && url.pathname === "/jsqr.js") {
         if (!JSQR_JS) return json(res, 404, { error: "QR decoder not bundled" });
         res.writeHead(200, {

@@ -203,6 +203,11 @@ known weaknesses: [SECURITY.md](SECURITY.md).
 - [x] `sandgate ask` — the human step from any script
 - [x] One-time pairing links, revocation (`sandgate unpair`), QR scanning in the app, lock-screen approvals
 - [x] Standalone Linux binaries for servers; SELinux policy for RHEL-family systems
+- [ ] Native iOS / Android app (lock-screen approvals; the PWA stays the
+      no-install and self-hosted path) — the wire protocol is documented in
+      [docs/protocol.md](docs/protocol.md) with test vectors
+- [ ] Passkey signing on the phone: agents cannot use a passkey, but your
+      phone can sign the challenge for them, once, with your face
 - [ ] Team policies (shared vault, centralized audit)
 - [x] Framework guides: [Claude Code](docs/integrations/claude-code.md), [browser-use](docs/integrations/browser-use.md), [Playwright MCP](docs/integrations/playwright-mcp.md), [LangGraph](docs/integrations/langgraph.md)
 

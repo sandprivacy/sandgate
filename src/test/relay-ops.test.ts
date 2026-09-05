@@ -85,3 +85,27 @@ test("behind a local proxy, X-Forwarded-For tells clients apart", async () => {
     assert.equal(fresh.status, 200, "client B is a different address and is not limited");
   });
 });
+
+test("the relay can vouch for a native app, and says nothing when it should not", async () => {
+  const relay = await startRelay({ port: 0, stateDir: mkdtempSync(join(tmpdir(), "sg-relay-")) });
+  const url = `http://localhost:${relay.port}`;
+  const path = "/.well-known/apple-app-site-association";
+  try {
+    // Nothing configured: no claim about any app.
+    assert.equal((await fetch(url + path)).status, 404);
+
+    // Configured: exactly what Apple needs for webcredentials, so a native
+    // app can use the passkeys already registered for this domain — which
+    // is what makes its assertions verify with no second code path.
+    process.env.SANDGATE_APPLE_APP = "ABCDE12345.dev.sandgate.app";
+    const res = await fetch(url + path);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+    assert.deepEqual(await res.json(), {
+      webcredentials: { apps: ["ABCDE12345.dev.sandgate.app"] },
+    });
+  } finally {
+    delete process.env.SANDGATE_APPLE_APP;
+    relay.close();
+  }
+});
