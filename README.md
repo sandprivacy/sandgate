@@ -132,6 +132,9 @@ sudo sandgate ssh-guard setup eyJ...     # on the server: that line, and you are
 sandgate ssh-guard enforce --yes         # once verified, start blocking
 ```
 
+Want key + phone and no password at all? `sudo sandgate ssh-guard install --key-only --yes`
+turns passwords off, refusing first if it finds no key for you.
+
 No Node on the server? Each release ships standalone Linux binaries
 (x64, arm64): one file under `/usr/local/bin`, same commands.
 

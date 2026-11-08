@@ -54,7 +54,10 @@ jobs:
           cache: npm
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          # Pinned: "latest" made the same tag compile to a different
+          # binary from one run to the next. 1.4.4 is the version the
+          # key-only mode was validated with against a real sshd.
+          bun-version: 1.4.4
       - run: npm ci
       - run: npm run build
       - name: Compile
@@ -74,6 +77,16 @@ jobs:
           env -i PAM_TYPE=account PAM_USER=ci PAM_RHOST=ci SANDGATE_SSH_GUARD_CONFIG=/tmp/ssh-guard.json ./sandgate-linux-x64 ssh-guard approve
           echo "binary answered the account phase with exit 0"
           ./sandgate-linux-x64 --help | head -3
+          # Upgrades on servers run `./sandgate.new --version && mv …`: the
+          # binary must answer it, with the tag's own version.
+          test "v$(./sandgate-linux-x64 --version)" = "${GITHUB_REF_NAME}"
+      - name: Checksum
+        run: |
+          ARCH="${{ matrix.target }}"
+          ARCH="${ARCH#bun-linux-}"
+          # Verified on the server before the binary replaces the PAM hook.
+          sha256sum "sandgate-linux-$ARCH" > "sandgate-linux-$ARCH.sha256"
+          cat "sandgate-linux-$ARCH.sha256"
       - uses: softprops/action-gh-release@v2
         with:
           files: sandgate-linux-*

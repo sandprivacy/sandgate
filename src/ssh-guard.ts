@@ -199,6 +199,15 @@ KEEP A SECOND SSH SESSION OPEN until you have tested a new login.
 
 5. Open a NEW ssh session. Your phone should buzz.
 
+Key + phone, no password (what \`install --key-only\` does): instead of
+step 2, put the hook BEFORE \`@include common-auth\` (or \`auth substack
+password-auth\`), so an approval ends the stack without a password:
+     auth [success=done ignore=ignore default=die] pam_exec.so quiet ${hookCommand}
+and in step 3 add \`PasswordAuthentication no\`. AuthenticationMethods must
+then demand publickey in EVERY list, Match blocks included — anywhere it
+does not, your phone alone opens the server. Root logging in by key also
+needs \`PermitRootLogin yes\`: prohibit-password refuses the PAM step.
+
 Escape hatches, set them before you need them:
   "exemptUsers": ["rescue"]   a user that never needs approval
   "failOpen": true            silence lets logins through (alerts, not a gate)`;

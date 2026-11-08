@@ -26,6 +26,11 @@ export async function runSshGuard(
   flags: string[] = []
 ): Promise<void> {
   const configPath = configPathFromEnv();
+  // `install --key-only --yes` puts a flag where `setup` puts its blob.
+  const all = [arg, ...flags].filter((a): a is string => typeof a === "string");
+  const keyOnly = all.includes("--key-only");
+  const yes = all.includes("--yes");
+  const positional = arg && !arg.startsWith("--") ? arg : undefined;
 
   switch (sub) {
     case "approve":
@@ -35,9 +40,9 @@ export async function runSshGuard(
     case "test":
       return test(configPath);
     case "setup":
-      return setup(configPath, arg);
+      return setup(configPath, positional, keyOnly, yes);
     case "install":
-      return install(configPath, arg === "--manual");
+      return install(configPath, all.includes("--manual"), keyOnly, yes);
     case "enforce":
       return enforce(configPath, arg === "--yes");
     case "uninstall":
@@ -52,6 +57,7 @@ export async function runSshGuard(
           "  setup <blob>     on the server, as root: write the config AND wire it up",
           "  install          on the server, as root: wire it up (notification mode)",
           "  install --manual print the lines instead of applying them",
+          "  --key-only --yes with setup/install: key + phone, passwords turned off",
           "  test             send a fake login to your phone",
           "  enforce --yes    switch from notifying to actually blocking",
           "  doctor           check the wiring and your escape hatch",
@@ -61,6 +67,39 @@ export async function runSshGuard(
       );
       process.exit(1);
   }
+}
+
+/**
+ * Turning passwords off on a machine that uses them is the one step this
+ * command cannot test for you: sshd cannot try your key from the inside.
+ * So it asks, like `enforce`, and says exactly what "yes" means.
+ */
+async function keyOnlyConfirmed(confirmed: boolean): Promise<boolean> {
+  const { effectiveSshdSettings, passwordLoginPossible, hookPlacedFirst, PAM_FILE, adminAccount } =
+    await import("./ssh-guard-install.js");
+  let alreadyKeyOnly = false;
+  try {
+    alreadyKeyOnly = hookPlacedFirst(readFileSync(PAM_FILE, "utf8"));
+  } catch {
+    /* no PAM file: installHook will say so */
+  }
+  if (alreadyKeyOnly || !passwordLoginPossible(effectiveSshdSettings())) return true;
+  if (confirmed) return true;
+  console.log(
+    [
+      "--key-only turns password logins OFF: every SSH login will need a key,",
+      "then your phone. No password, ever, for anyone.",
+      "",
+      "Before rerunning with --yes, make sure that:",
+      `  1. ${adminAccount()} logs in with a key — tested from a NEW terminal`,
+      "  2. this session stays open until a new login has worked",
+      "  3. your provider's web console works (it does not go through SSH)",
+      "",
+      "The command refuses by itself if it finds no key for you, but it",
+      "cannot try that key from here.",
+    ].join("\n")
+  );
+  return false;
 }
 
 async function binaryInvocation(): Promise<string> {
@@ -176,7 +215,7 @@ async function pair(
       `     sudo sandgate ssh-guard setup ${blob}`,
       "",
       "   That single command writes the config and wires up PAM, in",
-      "   notification mode so it cannot lock you out.",
+      "   notification mode, so a silent phone cannot lock you out.",
       "",
       "   The blob carries this server's pairing secret, so it will sit in",
       "   your shell history. Prefer to avoid that? Pipe it instead:",
@@ -191,7 +230,12 @@ async function pair(
  * then wire up PAM. Pass "-" to read the blob from stdin instead, when you
  * would rather it not appear in ps output or shell history.
  */
-async function setup(configPath: string, blob: string | undefined): Promise<void> {
+async function setup(
+  configPath: string,
+  blob: string | undefined,
+  keyOnly = false,
+  confirmed = false
+): Promise<void> {
   const { installHook, isRoot } = await import("./ssh-guard-install.js");
   const { writeFileSync, mkdirSync } = await import("node:fs");
   const { dirname } = await import("node:path");
@@ -200,6 +244,7 @@ async function setup(configPath: string, blob: string | undefined): Promise<void
     console.error("Run this as root (sudo): it writes to /etc and edits sshd's configuration.");
     process.exit(1);
   }
+  if (keyOnly && !(await keyOnlyConfirmed(confirmed))) process.exit(1);
   let encoded = blob;
   if (!encoded || encoded === "-") {
     encoded = await new Promise<string>((resolve) => {
@@ -232,7 +277,7 @@ async function setup(configPath: string, blob: string | undefined): Promise<void
   writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
   console.log(`  config written to ${configPath} (root, 0600)`);
 
-  const report = installHook();
+  const report = installHook({ keyOnly });
   for (const step of report.steps) console.log(`  ${step}`);
   if (report.backups.length) console.log(`  backups: ${report.backups.join(", ")}`);
   if (report.error) {
@@ -242,9 +287,10 @@ async function setup(configPath: string, blob: string | undefined): Promise<void
   console.log(
     [
       "",
-      "Installed in NOTIFICATION mode — this step cannot lock you out:",
+      "Installed in NOTIFICATION mode — a silent phone cannot lock you out:",
       "logins are announced on your phone and a Deny stops them, but",
-      "silence still lets them through.",
+      "silence still lets them through. (A broken sandgate binary still",
+      "refuses every login: replace it with mv, never by writing over it.)",
       "",
       "Now, WITHOUT closing this session:",
       "  1. sandgate ssh-guard test          (your phone should buzz)",
@@ -256,7 +302,12 @@ async function setup(configPath: string, blob: string | undefined): Promise<void
   );
 }
 
-async function install(configPath: string, manual: boolean): Promise<void> {
+async function install(
+  configPath: string,
+  manual: boolean,
+  keyOnly = false,
+  confirmed = false
+): Promise<void> {
   const {
     installHook,
     isRoot,
@@ -270,6 +321,7 @@ async function install(configPath: string, manual: boolean): Promise<void> {
     console.error("Run this as root (sudo): it edits sshd's configuration.");
     process.exit(1);
   }
+  if (keyOnly && !(await keyOnlyConfirmed(confirmed))) process.exit(1);
   let config;
   try {
     config = loadGuardConfig(configPath);
@@ -278,7 +330,7 @@ async function install(configPath: string, manual: boolean): Promise<void> {
     process.exit(1);
   }
 
-  const report = installHook();
+  const report = installHook({ keyOnly });
   for (const step of report.steps) console.log(`  ${step}`);
   if (report.backups.length) {
     console.log(`  backups: ${report.backups.join(", ")}`);
@@ -299,7 +351,7 @@ ${report.error}`);
       notifying
         ? "an explicit Deny stops them, but silence still lets them through — so a"
         : "Silence now refuses logins. Make sure you have an exempt user.",
-      notifying ? "mistake here cannot lock you out." : "",
+      notifying ? "silent phone cannot lock you out." : "",
       "",
       "Now, WITHOUT closing this session:",
       "  1. sandgate ssh-guard test        (your phone should buzz)",
@@ -390,26 +442,25 @@ async function doctor(configPath: string): Promise<void> {
     problems.push(String(err instanceof Error ? err.message : err));
   }
 
-  const pamFile = "/etc/pam.d/sshd";
-  if (existsSync(pamFile)) {
-    const hooked = /pam_exec\.so.*ssh-guard\s+approve/.test(readFileSync(pamFile, "utf8"));
-    console.log(`pam hook                 ${hooked ? "ok" : "MISSING"}`);
-    if (!hooked) problems.push(`add the pam_exec line to ${pamFile} (see: ssh-guard install)`);
-  }
-
-  // Ask sshd what it actually resolved to: reading sshd_config alone
-  // misses drop-in files, and reported a correct install as broken.
-  const { effectiveSshdSettings } = await import("./ssh-guard-install.js");
-  const settings = effectiveSshdSettings();
-  if (settings) {
-    const methods = settings.get("authenticationmethods") ?? "any";
-    const forced = methods.includes("keyboard-interactive:pam");
-    console.log(`key logins go through PAM ${forced ? "ok" : "NOT FORCED"}`);
-    if (!forced) {
-      problems.push(
-        `sshd resolves AuthenticationMethods to "${methods}", so key-based logins ` +
-          "never reach the hook — rerun `sandgate ssh-guard install`"
-      );
+  // Ask sshd what it actually resolved to — globally, and for root and
+  // you with Match blocks applied: reading sshd_config alone misses
+  // drop-in files, and reported a correct install as broken.
+  const { effectiveSshdSettings, analyzeWiring, adminAccount, matchSpec, userHasKey, PAM_FILE } =
+    await import("./ssh-guard-install.js");
+  if (existsSync(PAM_FILE)) {
+    const accounts = [...new Set(["root", adminAccount()])].map((user) => {
+      const settings = effectiveSshdSettings(matchSpec(user));
+      return { user, settings, usesKey: userHasKey(user, settings) !== false };
+    });
+    const findings = analyzeWiring({
+      pamText: readFileSync(PAM_FILE, "utf8"),
+      global: effectiveSshdSettings(),
+      accounts,
+    });
+    for (const f of findings) {
+      const status = f.level === "ok" ? "ok" : f.level === "warn" ? "WARNING" : "PROBLEM";
+      console.log(`${f.label.padEnd(25)}${status}`);
+      if (f.detail) problems.push(f.detail);
     }
   }
 

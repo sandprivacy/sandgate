@@ -863,6 +863,13 @@ async function cmdChannel(name?: string): Promise<void> {
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   switch (command) {
+    case "--version":
+    case "-v":
+    case "version": {
+      const { VERSION } = await import("./version.js");
+      console.log(VERSION);
+      return;
+    }
     case "init":
       return cmdInit();
     case "add-totp":

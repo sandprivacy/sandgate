@@ -47,10 +47,20 @@ sudo sandgate ssh-guard setup eyJyZWxheVVybCI6...   # the exact line `pair` prin
 Rather not put Node on a server? Each release ships a standalone binary:
 
 ```bash
-curl -fsSL https://github.com/sandprivacy/sandgate/releases/latest/download/sandgate-linux-x64 -o /usr/local/bin/sandgate
-chmod +x /usr/local/bin/sandgate
+V=v0.9.0   # pin the version you mean to run
+cd /usr/local/bin
+curl -fL --progress-bar -o sandgate.new https://github.com/sandprivacy/sandgate/releases/download/$V/sandgate-linux-x64
+curl -fsSL https://github.com/sandprivacy/sandgate/releases/download/$V/sandgate-linux-x64.sha256 \
+  | sed 's/sandgate-linux-x64/sandgate.new/' | sha256sum -c -
+chmod +x sandgate.new && ./sandgate.new --version && mv sandgate.new sandgate
 sudo sandgate ssh-guard setup eyJ...     # identical from here on
 ```
+
+Download to a temporary name and `mv` it into place — always, and above
+all when upgrading. Once installed, this file IS the PAM hook: a download
+cut halfway, written straight over it, leaves a truncated binary that
+refuses every SSH login. `mv` swaps it in one step, so PAM only ever sees
+the old binary or the new one.
 
 The installer writes the binary itself as the PAM hook — no interpreter,
 one file, `bin_t` under SELinux.
@@ -64,9 +74,14 @@ result it puts everything back and never reloads. Idempotent;
 The blob carries this server's pairing secret, so it lands in your shell
 history. To avoid that, pipe it instead: `... | sudo sandgate ssh-guard setup -`.
 
-**It lands in notification mode**, so this first step cannot lock you
-out: logins are announced on your phone and an explicit Deny stops them,
-but silence still lets them through. Verify, then commit:
+**It lands in notification mode**, so a silent phone or a relay outage
+cannot lock you out: logins are announced on your phone and an explicit
+Deny stops them, but silence still lets them through. What notification
+mode does *not* cover is a broken hook: if the sandgate binary itself
+cannot run (a truncated download, the wrong architecture), PAM refuses
+every login, exempt users included — `failOpen` and `exemptUsers` are
+decided inside that binary. Keep the second session open. Verify, then
+commit:
 
 ```bash
 sandgate ssh-guard test              # your phone should buzz
@@ -78,6 +93,70 @@ sandgate ssh-guard enforce --yes     # now silence refuses logins
 the lines before they are applied? `sandgate ssh-guard install --manual`
 prints them and touches nothing, and `install` alone wires up a config
 you placed yourself.
+
+## Key + phone, no password (`--key-only`)
+
+By default, a machine that accepts passwords keeps doing so: password,
+then phone. The stronger setup is a key, then your phone, and no
+password at all: a leaked password is then worthless, and a stolen key
+is useless without your phone.
+
+```bash
+# first, from your workstation: put your key on the server, and log in
+# with it from a NEW terminal to be sure it works
+ssh-copy-id root@vps-prod
+
+# then, on the server (the session you keep open):
+sudo sandgate ssh-guard install --key-only --yes
+# or, on a fresh server: ... | sudo sandgate ssh-guard setup - --key-only --yes
+```
+
+What changes:
+
+- The hook moves **before** the password check in `/etc/pam.d/sshd`, as
+  `auth [success=done ignore=ignore default=die] pam_exec.so …`: an
+  approval ends authentication there, so no password is asked; a Deny,
+  silence or a crash refuses on the spot. No line of the distribution's
+  is edited, so `uninstall` still just removes the marked block.
+- The drop-in adds `PasswordAuthentication no` and keeps only
+  `AuthenticationMethods publickey,keyboard-interactive:pam`: a key
+  first, always.
+- If root logs in by key under `PermitRootLogin prohibit-password` (the
+  OpenSSH default), the drop-in also says `PermitRootLogin yes`.
+  `prohibit-password` refuses keyboard-interactive for root, which is the
+  phone step, so root could not log in at all. With a key required
+  first, `yes` lets the phone step run and nothing else.
+
+What it refuses, before touching anything:
+
+- **No key for you.** Whoever ran `sudo` (else root) must have a key in
+  `authorized_keys`. The command cannot try that key from the inside,
+  which is why it also wants `--yes` on a machine that uses passwords
+  today.
+- **A Match block with a keyless policy.** A `Match User …` that sets
+  `AuthenticationMethods keyboard-interactive:pam` would be your phone
+  alone, for those users. After writing, the installer also asks sshd
+  itself (`sshd -T -C user=…`) for root and for you, Match blocks
+  applied, and puts everything back if a login could reach the hook
+  without a key.
+- **A PAM layout it does not recognise** (no `@include common-auth` or
+  `auth substack password-auth`): it will not guess where the hook goes.
+
+**The one rule that keeps this safe:** with the hook before the
+password check, the phone is the second factor, so sshd must demand a
+key first, everywhere. If you re-enable a password-only path later,
+your phone alone opens the server. `sandgate ssh-guard doctor` checks
+for exactly that and reports it as a problem.
+
+A machine that already has no password login gets this placement
+automatically: earlier versions appended the hook after the password
+check there, so logins asked key, then the Unix password, then the
+phone, and an account with no password (root on most cloud images)
+could not log in. `doctor` flags such an install, and
+`install --key-only` fixes it in place.
+
+After an `openssh-server` upgrade, run `doctor`: if the package replaced
+`/etc/pam.d/sshd`, the hook is gone and logins stop asking you.
 
 ## If you lose access anyway
 
@@ -108,7 +187,8 @@ This is the real risk — the cryptography is the easy part.
   entirely — keep it working. It is the recovery path above.
 - The installer reads sshd's own effective configuration and keeps the
   way in that this machine actually uses: on a password box it adds a
-  PAM-only path (still gated), on a key-only box it requires the key.
+  PAM-only path (still gated), on a key-only box it requires the key,
+  then the phone, and no password (see `--key-only` above).
   Early versions always demanded a public key, which locked a real
   password-only server out during testing.
 - Keep `timeoutSec` below sshd's `LoginGraceTime` (120s by default), or
