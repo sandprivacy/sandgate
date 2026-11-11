@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
-import { hostname } from "node:os";
+import { hostname, networkInterfaces } from "node:os";
+import { createHash } from "node:crypto";
 import { PwaApprover } from "./pwa-approver.js";
 import type { BiometricCredential } from "./webauthn.js";
 import { recall, remember, claim, release, awaitDecision } from "./ssh-decision-cache.js";
@@ -64,6 +65,11 @@ export interface LoginContext {
   rhost: string;
   service?: string;
   pamType?: string;
+  /**
+   * SSH_AUTH_INFO_0: what sshd already verified before the phone step,
+   * e.g. "publickey ssh-ed25519 AAAA…". Exposed to PAM by sshd itself.
+   */
+  authInfo?: string;
 }
 
 export function loginFromEnv(env: NodeJS.ProcessEnv): LoginContext {
@@ -72,14 +78,78 @@ export function loginFromEnv(env: NodeJS.ProcessEnv): LoginContext {
     rhost: env.PAM_RHOST || "unknown source",
     service: env.PAM_SERVICE,
     pamType: env.PAM_TYPE,
+    authInfo: env.SSH_AUTH_INFO_0 || undefined,
   };
 }
 
-export function describeLogin(login: LoginContext, config: SshGuardConfig) {
+/** The key sshd accepted: type, SHA256 fingerprint (as ssh-keygen -l prints it), blob. */
+export function verifiedKey(authInfo: string | undefined): { type: string; fingerprint: string; blob: string } | null {
+  const m = (authInfo ?? "").match(/^publickey\s+(\S+)\s+([A-Za-z0-9+/=]+)/m);
+  if (!m) return null;
+  const digest = createHash("sha256").update(Buffer.from(m[2]!, "base64")).digest("base64").replace(/=+$/, "");
+  const type = m[1]!.replace(/^ssh-/, "").replace(/-cert-v01@openssh\.com$/, "-cert").toUpperCase();
+  return { type, fingerprint: `SHA256:${digest}`, blob: m[2]! };
+}
+
+/** The comment of that key in the user's authorized_keys ("baltha@laptop"), if any. */
+export function keyComment(authorizedKeys: string, blob: string): string | undefined {
+  for (const line of authorizedKeys.split("\n")) {
+    const at = line.indexOf(blob);
+    if (at < 0) continue;
+    const rest = line.slice(at + blob.length).trim();
+    return rest ? rest.slice(0, 60) : undefined;
+  }
+  return undefined;
+}
+
+function readAuthorizedKeys(user: string): string {
+  try {
+    const entry = readFileSync("/etc/passwd", "utf8")
+      .split("\n")
+      .find((l) => l.split(":")[0] === user);
+    const home = entry?.split(":")[5];
+    if (!home) return "";
+    return ["authorized_keys", "authorized_keys2"]
+      .map((f) => {
+        try {
+          return readFileSync(`${home}/.ssh/${f}`, "utf8");
+        } catch {
+          return "";
+        }
+      })
+      .join("\n");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * What the phone shows. Who, where, from where — and, when sshd already
+ * checked a key, WHICH key: "baltha@laptop" or an unknown fingerprint is
+ * exactly the difference between your own login and a stolen key.
+ */
+export function describeLogin(
+  login: LoginContext,
+  config: SshGuardConfig,
+  extra: { serverAddress?: string; authorizedKeys?: (user: string) => string } = {}
+) {
   const where = config.serverName || hostname();
+  const lines = [`From ${login.rhost}`];
+  const key = verifiedKey(login.authInfo);
+  if (key) {
+    let comment: string | undefined;
+    try {
+      comment = keyComment((extra.authorizedKeys ?? readAuthorizedKeys)(login.user), key.blob);
+    } catch {
+      comment = undefined;
+    }
+    lines.push(`Key: ${comment ? comment + " · " : ""}${key.type} ${key.fingerprint}`);
+  }
+  lines.push(`Server: ${where}${extra.serverAddress ? " · " + extra.serverAddress : ""}`);
+  lines.push("Approve to let this session in.");
   return {
     title: `SSH login: ${login.user}@${where}`,
-    body: `From ${login.rhost}. Approve to let this session in.`,
+    body: lines.join("\n"),
   };
 }
 
@@ -140,7 +210,14 @@ export async function decideLogin(
     biometric: config.biometric,
     requireBiometric: config.requireBiometric,
   });
-  const { title, body } = describeLogin(login, config);
+  let serverAddress: string | undefined;
+  try {
+    const { serverAddresses } = await import("./ssh-guard-heartbeat.js");
+    serverAddress = serverAddresses(networkInterfaces())[0];
+  } catch {
+    serverAddress = undefined;
+  }
+  const { title, body } = describeLogin(login, config, { serverAddress });
 
   try {
     const result = await approver.request({

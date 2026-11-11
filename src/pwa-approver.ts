@@ -21,6 +21,23 @@ import {
  * deny — but never forge one.
  */
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Worth trying again? A 5xx is the relay or its proxy having a moment; a
+ * 429 is retryable only when the relay says so (its per-address limit),
+ * never for a pairing that is flooding the phone.
+ */
+async function transient(res: Response): Promise<boolean> {
+  if (res.status >= 500) return true;
+  if (res.status !== 429) return false;
+  try {
+    return (await res.json())?.retryable === true;
+  } catch {
+    return false;
+  }
+}
+
 export interface PwaConfig {
   relayUrl: string;
   pairId: string;
@@ -90,17 +107,37 @@ export class PwaApprover implements Approver {
       aadForRequest(requestId)
     );
 
-    const post = await this.fetchWithTimeout(
-      this.url("/api/request"),
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // ttlSec: past the timeout, a push is worthless — the push service
-        // may drop it instead of delivering it hours later.
-        body: JSON.stringify({ pairId: this.config.pairId, requestId, payload: sealed, needed: quorum, ttlSec: req.timeoutSec }),
-      },
-      15
-    );
+    // A request lost to a blip (network, relay restart, a proxy's 5xx) is
+    // retried with the same id — the relay treats a repeat as the same
+    // request. A per-pairing 429 is deliberate (a flooded phone) and final.
+    const postBody = JSON.stringify({
+      pairId: this.config.pairId,
+      requestId,
+      payload: sealed,
+      needed: quorum,
+      // ttlSec: past the timeout the request is dead — the relay stops
+      // showing it and stops counting it against the pairing, and the
+      // push service may drop a push instead of delivering it hours late.
+      ttlSec: req.timeoutSec,
+    });
+    let post: Response | null = null;
+    let postError = "";
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (attempt) await sleep(attempt * 1000);
+      try {
+        post = await this.fetchWithTimeout(
+          this.url("/api/request"),
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: postBody },
+          15
+        );
+      } catch (err) {
+        post = null;
+        postError = err instanceof Error ? err.message : String(err);
+        continue;
+      }
+      if (post.ok || !(await transient(post))) break;
+    }
+    if (!post) throw new Error(`Relay unreachable (${postError}).`);
     if (!post.ok) throw new Error(`Relay refused the request (HTTP ${post.status}).`);
 
     const close = () =>
@@ -122,18 +159,33 @@ export class PwaApprover implements Approver {
     // one phone must not be able to make up a quorum by tapping twice.
     const approvedBy = new Set<string>();
     let approvedDecision: DecisionPayload | null = null;
+    let hiccups = 0;
     while (Date.now() < deadline) {
       const pollSec = Math.min(25, Math.max(1, Math.ceil((deadline - Date.now()) / 1000)));
-      const res = await this.fetchWithTimeout(
-        this.url(
-          `/api/decision?pairId=${encodeURIComponent(this.config.pairId)}` +
-            `&requestId=${encodeURIComponent(requestId)}&timeoutSec=${pollSec}&after=${seen}`
-        ),
-        {},
-        pollSec + 10
-      );
+      let res: Response;
+      try {
+        res = await this.fetchWithTimeout(
+          this.url(
+            `/api/decision?pairId=${encodeURIComponent(this.config.pairId)}` +
+              `&requestId=${encodeURIComponent(requestId)}&timeoutSec=${pollSec}&after=${seen}`
+          ),
+          {},
+          pollSec + 10
+        );
+      } catch {
+        // The network dropped the long-poll: the answer may already be
+        // waiting on the relay. Keep asking until the deadline — giving up
+        // here refused real logins while the phone said "Approved".
+        await sleep(Math.min(5000, 500 * 2 ** hiccups++));
+        continue;
+      }
       if (res.status === 204) continue;
+      if (!res.ok && (await transient(res))) {
+        await sleep(Math.min(5000, 500 * 2 ** hiccups++));
+        continue;
+      }
       if (!res.ok) throw new Error(`Relay error while waiting (HTTP ${res.status}).`);
+      hiccups = 0;
       const body = (await res.json()) as { payload: any; payloads?: any[] };
       const payloads: any[] = body.payloads ?? [body.payload];
       const fresh = payloads.slice(seen);

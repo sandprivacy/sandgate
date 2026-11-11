@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +12,7 @@ process.env.SANDGATE_SSH_CACHE_DIR = mkTemp(join(tmpdir(), "sandgate-guard-cache
 
 const { newPairing, deriveKey, seal, open, aadForRequest, aadForDecision } = await import("../pwacrypto.js");
 const { startRelay } = await import("../relay/server.js");
-const { decideLogin, describeLogin, loginFromEnv, loadGuardConfig } = await import(
+const { decideLogin, describeLogin, loginFromEnv, loadGuardConfig, verifiedKey } = await import(
   "../ssh-guard.js"
 );
 type SshGuardConfig = import("../ssh-guard.js").SshGuardConfig;
@@ -161,9 +162,41 @@ test("config loading refuses a half-written file rather than guessing", () => {
 
 test("PAM environment maps to a login context", () => {
   const ctx = loginFromEnv({ PAM_USER: "deploy", PAM_RHOST: "10.0.0.9", PAM_TYPE: "auth" } as any);
-  assert.deepEqual(ctx, { user: "deploy", rhost: "10.0.0.9", service: undefined, pamType: "auth" });
+  assert.deepEqual(ctx, { user: "deploy", rhost: "10.0.0.9", service: undefined, pamType: "auth", authInfo: undefined });
   const missing = loginFromEnv({} as any);
   assert.equal(missing.user, "unknown");
+});
+
+test("the phone is told which key sshd accepted, by its authorized_keys name", () => {
+  // A real ed25519 public key blob; fingerprint as `ssh-keygen -lf` prints it.
+  const blob = "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+  const fp = "SHA256:" + createHash("sha256").update(Buffer.from(blob, "base64")).digest("base64").replace(/=+$/, "");
+  const login = loginFromEnv({
+    PAM_USER: "root",
+    PAM_RHOST: "203.0.113.7",
+    PAM_TYPE: "auth",
+    SSH_AUTH_INFO_0: `publickey ssh-ed25519 ${blob}\n`,
+  } as any);
+  const { title, body } = describeLogin(
+    login,
+    { relayUrl: "x", pairId: "p", secret: "s", serverName: "us4" },
+    {
+      serverAddress: "51.0.0.4",
+      authorizedKeys: () => `ssh-rsa AAAAB3other old@box\nssh-ed25519 ${blob} baltha@MSI\n`,
+    }
+  );
+  assert.equal(title, "SSH login: root@us4");
+  assert.equal(
+    body,
+    `From 203.0.113.7\nKey: baltha@MSI · ED25519 ${fp}\nServer: us4 · 51.0.0.4\nApprove to let this session in.`
+  );
+  // A key nobody named still shows its fingerprint; no key info, no line.
+  assert.match(
+    describeLogin(login, { relayUrl: "x", pairId: "p", secret: "s" }, { authorizedKeys: () => "" }).body,
+    /^Key: ED25519 SHA256:/m
+  );
+  assert.doesNotMatch(describeLogin({ user: "a", rhost: "b" }, { relayUrl: "x", pairId: "p", secret: "s" }).body, /Key:/);
+  assert.equal(verifiedKey("password\n"), null);
 });
 
 test("a refusal survives the retries sshd makes for one login", async () => {

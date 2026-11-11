@@ -58,7 +58,8 @@ sudo systemctl enable --now sandgate-relay
 
 - `GET /api/health` — `{ok, uptime_sec, pairings, active_requests}` for an uptime check.
 - `GET /api/metrics` — Prometheus text: requests, decisions, push sent/failed, claims issued/collected, rate-limited calls, active requests, pairings. Nothing per user.
-- Rate limits: 12 requests/min and 5 undecided per pairing (against flooding a phone), 240 API calls/min per client address (against invented pair ids). Behind a proxy the first `X-Forwarded-For` hop is the client.
+- Rate limits: 12 requests/min and 5 undecided (unexpired) per pairing, against flooding a phone; 240 API calls/min per client address for pairings not in use, against invented pair ids. Calls about pairings in use are not counted there. `sandgate_relay_rate_limited_total` climbing fast means real clients are being refused — look at how the relay sees addresses.
+- Client addresses: behind Cloudflare (proxied DNS straight to the VPS, or cloudflared on the host), the relay takes `CF-Connecting-IP` when the connection comes from Cloudflare's published ranges or from a local proxy. Behind another proxy on the host or the private network, the first `X-Forwarded-For` hop. Anything else connecting directly is taken at its own address. Before 0.9.1, Cloudflare's edge was not recognised: every phone, gateway and server shared a few edge addresses and one limit.
 
 ## Upgrading
 

@@ -27,6 +27,13 @@ interface RelayRequestEntry {
   decisions: unknown[];
   /** How many decisions the gateway wants before the phones stop showing it. */
   needed: number;
+  /**
+   * When the gateway stops waiting (its ttlSec). A gateway killed mid-wait
+   * — sshd dropping a login, a Ctrl-C — never says goodbye; without this
+   * its request counted as "undecided" for 30 minutes, and five of them
+   * locked the pairing out of new requests.
+   */
+  expiresAt: number;
   waiters: ((decisions: unknown[]) => void)[];
 }
 
@@ -111,6 +118,73 @@ export const quietAfterMs = (intervalSec: number) => Math.max(MIN_QUIET_MS, MISS
  */
 const IP_WINDOW_MS = 60 * 1000;
 const MAX_PER_IP = 240;
+/** Calls for pairings in use: a ceiling against a runaway loop, not a quota. */
+const MAX_KNOWN_PER_IP = 3000;
+/** Pairings one batched call (pending, events, status) may cover. */
+const MAX_BATCH = 64;
+
+/**
+ * Cloudflare's published ranges (cloudflare.com/ips). A connection from
+ * one of them is Cloudflare speaking, and CF-Connecting-IP is the client:
+ * Cloudflare sets it itself, so a client cannot forge it through them.
+ * Without this, every phone and server behind Cloudflare had the same
+ * address — a handful of edge IPs — and shared one rate limit.
+ */
+const CLOUDFLARE_RANGES = [
+  "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+  "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+  "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+  "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+  "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+  "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+];
+
+function ipToBigInt(addr: string): { v6: boolean; n: bigint } | null {
+  const a = addr.replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/i, "");
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(a)) {
+    const parts = a.split(".").map(Number);
+    if (parts.some((p) => p > 255)) return null;
+    return { v6: false, n: parts.reduce((acc, p) => (acc << 8n) | BigInt(p), 0n) };
+  }
+  if (!a.includes(":")) return null;
+  const [head, tail] = a.split("::");
+  const h = head ? head.split(":") : [];
+  const t = tail !== undefined ? (tail ? tail.split(":") : []) : [];
+  if (tail === undefined && h.length !== 8) return null;
+  const groups = [...h, ...Array(8 - h.length - t.length).fill("0"), ...t];
+  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/i.test(g))) return null;
+  return { v6: true, n: groups.reduce((acc, g) => (acc << 16n) | BigInt(parseInt(g, 16)), 0n) };
+}
+
+export function inRange(addr: string, cidr: string): boolean {
+  const [base, bitsText] = cidr.split("/");
+  const ip = ipToBigInt(addr);
+  const net = ipToBigInt(base!);
+  if (!ip || !net || ip.v6 !== net.v6) return false;
+  const width = ip.v6 ? 128n : 32n;
+  const shift = width - BigInt(bitsText!);
+  return ip.n >> shift === net.n >> shift;
+}
+
+/** A proxy on this host or this network may speak for the client. */
+const fromLocalProxy = (addr: string): boolean =>
+  /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|::ffff:(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)|f[cd][0-9a-f]{2}:)/i.test(addr);
+
+/**
+ * Who is calling. A stranger connecting straight to the port is who it
+ * is: their forged headers would be a free pass around the limit. A
+ * local proxy may name the client (X-Forwarded-For, or Cloudflare's
+ * header when cloudflared runs here); Cloudflare's edge may too.
+ */
+export function clientAddress(peer: string, headers: IncomingMessage["headers"]): string {
+  const cf = headers["cf-connecting-ip"];
+  const xff = headers["x-forwarded-for"];
+  const local = fromLocalProxy(peer);
+  const edge = !local && CLOUDFLARE_RANGES.some((r) => inRange(peer, r));
+  if ((local || edge) && typeof cf === "string" && cf.trim()) return cf.trim();
+  if (local && typeof xff === "string" && xff.trim()) return xff.split(",")[0]!.trim();
+  return peer;
+}
 
 /**
  * The QR decoder the app loads on demand for "scan a pairing code".
@@ -170,31 +244,32 @@ export async function startRelay(opts: {
   };
 
   const ipHits = new Map<string, number[]>();
-  // A proxy on this host or this network may speak for the client. A
-  // stranger connecting straight to the port may not: their forged
-  // X-Forwarded-For would be a free pass around the limit.
-  const fromLocalProxy = (addr: string): boolean =>
-    /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|::ffff:(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)|f[cd][0-9a-f]{2}:)/i.test(addr);
-  const clientIp = (req: IncomingMessage): string => {
-    const peer = req.socket.remoteAddress ?? "?";
-    const xff = req.headers["x-forwarded-for"];
-    if (typeof xff === "string" && xff.trim() && fromLocalProxy(peer)) {
-      return xff.split(",")[0]!.trim();
-    }
-    return peer;
-  };
-  const ipLimited = (req: IncomingMessage): boolean => {
-    const ip = clientIp(req);
+  const knownHits = new Map<string, number[]>();
+  const clientIp = (req: IncomingMessage): string =>
+    clientAddress(req.socket.remoteAddress ?? "?", req.headers);
+  const hit = (table: Map<string, number[]>, ip: string, max: number): boolean => {
     const now = Date.now();
-    const hits = (ipHits.get(ip) ?? []).filter((t) => now - t < IP_WINDOW_MS);
-    if (hits.length >= MAX_PER_IP) {
-      ipHits.set(ip, hits);
+    const hits = (table.get(ip) ?? []).filter((t) => now - t < IP_WINDOW_MS);
+    if (hits.length >= max) {
+      table.set(ip, hits);
       metrics.rateLimited++;
       return true;
     }
     hits.push(now);
-    ipHits.set(ip, hits);
+    table.set(ip, hits);
     return false;
+  };
+  const ipLimited = (req: IncomingMessage): boolean => hit(ipHits, clientIp(req), MAX_PER_IP);
+  /**
+   * Is this a pairing someone actually uses? Traffic for those is not what
+   * the per-address limit is for (invented pair ids), and counting it
+   * there refused real approvals: behind one proxy address, a phone, its
+   * gateways and its servers shared 240 calls a minute.
+   */
+  const known = (pairId: string): boolean => {
+    if (state.subscriptions[pairId] || state.statuses?.[pairId]) return true;
+    const p = pairings.get(pairId);
+    return !!p && (p.requests.size > 0 || p.listeners.size > 0 || !!p.claim || !!p.lastSeen || !!p.claimedAt);
   };
 
   const pairings = new Map<string, Pairing>();
@@ -257,23 +332,27 @@ export async function startRelay(opts: {
       st.offlineAlerted = true;
       changed = true;
       pushAll(pairId, JSON.stringify({ type: "server", pairId, state: "offline", since: st.receivedAt }), 3600);
-      notifyListeners(getPairing(pairId), "status");
+      notifyListeners(getPairing(pairId), "status", pairId);
     }
     if (changed) persist();
   };
 
-  const notifyListeners = (pairing: Pairing, event: string) => {
+  const notifyListeners = (pairing: Pairing, event: string, pairId?: string) => {
+    // A batched stream covers several pairings: say which one changed.
+    const data = pairId ? JSON.stringify({ pairId }) : "{}";
     for (const listener of pairing.listeners) {
-      listener.write(`event: ${event}\ndata: {}\n\n`);
+      listener.write(`event: ${event}\ndata: ${data}\n\n`);
     }
   };
 
   const gc = setInterval(() => {
     const cutoff = Date.now() - REQUEST_TTL_MS;
     const claimCutoff = Date.now() - claimTtl;
+    const now = Date.now();
     for (const p of pairings.values()) {
       for (const [id, entry] of p.requests) {
-        if (entry.ts < cutoff) p.requests.delete(id);
+        // Two minutes past its expiry: room for a gateway's last long-poll.
+        if (entry.ts < cutoff || now > entry.expiresAt + 2 * 60_000) p.requests.delete(id);
       }
       if (p.claim && p.claim.ts < claimCutoff) p.claim = undefined;
     }
@@ -288,10 +367,12 @@ export async function startRelay(opts: {
     }
     checkQuiet();
     const ipCutoff = Date.now() - IP_WINDOW_MS;
-    for (const [ip, hits] of ipHits) {
-      const live = hits.filter((t) => t > ipCutoff);
-      if (live.length) ipHits.set(ip, live);
-      else ipHits.delete(ip);
+    for (const table of [ipHits, knownHits]) {
+      for (const [ip, hits] of table) {
+        const live = hits.filter((t) => t > ipCutoff);
+        if (live.length) table.set(ip, live);
+        else table.delete(ip);
+      }
     }
   }, Math.min(60_000, claimTtl));
   gc.unref();
@@ -302,7 +383,17 @@ export async function startRelay(opts: {
     res.end(data);
   }
 
+  // Read once: the rate limit looks at the body before the route does.
+  const bodies = new WeakMap<IncomingMessage, Promise<any>>();
   function readBody(req: IncomingMessage): Promise<any> {
+    let pending = bodies.get(req);
+    if (!pending) {
+      pending = readBodyOnce(req);
+      bodies.set(req, pending);
+    }
+    return pending;
+  }
+  function readBodyOnce(req: IncomingMessage): Promise<any> {
     return new Promise((resolve, reject) => {
       let size = 0;
       const chunks: Buffer[] = [];
@@ -416,9 +507,20 @@ export async function startRelay(opts: {
         res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4" });
         return res.end(lines.join("\n"));
       }
-      if (url.pathname.startsWith("/api/") && url.pathname !== "/api/health" && url.pathname !== "/api/events") {
-        if (ipLimited(req)) {
-          return json(res, 429, { error: "Too many requests from this address. Slow down." });
+      if (url.pathname.startsWith("/api/") && url.pathname !== "/api/health") {
+        // Which pairings is this call about? Bodies are read once and kept.
+        let body: any = null;
+        if (req.method === "POST" || req.method === "DELETE") body = await readBody(req);
+        const ids = [
+          url.searchParams.get("pairId"),
+          ...(url.searchParams.get("pairIds") ?? "").split(","),
+          body?.pairId,
+        ].filter((id): id is string => typeof id === "string" && id.length > 0);
+        const allKnown = ids.length > 0 && ids.every(known);
+        const limited = allKnown ? hit(knownHits, clientIp(req), MAX_KNOWN_PER_IP) : ipLimited(req);
+        if (limited) {
+          // retryable: this limit passes in seconds; a client may try again.
+          return json(res, 429, { error: "Too many requests from this address. Slow down.", retryable: true });
         }
       }
       if (req.method === "GET" && url.pathname === "/api/health") {
@@ -452,6 +554,21 @@ export async function startRelay(opts: {
         pairing.subscriptions.push(sub);
         while (pairing.subscriptions.length > MAX_SUBSCRIPTIONS) pairing.subscriptions.shift();
         state.subscriptions[body.pairId] = pairing.subscriptions;
+        persist();
+        return json(res, 200, { ok: true });
+      }
+
+      // A vault removed from a device: that device stops ringing for it.
+      // Before this, the relay kept pushing a removed vault's requests.
+      if (req.method === "POST" && url.pathname === "/api/unsubscribe") {
+        const body = await readBody(req);
+        if (!validId(body.pairId) || typeof body.endpoint !== "string") {
+          return json(res, 400, { error: "pairId and endpoint required" });
+        }
+        const pairing = getPairing(body.pairId);
+        pairing.subscriptions = pairing.subscriptions.filter((s) => s.endpoint !== body.endpoint);
+        if (pairing.subscriptions.length) state.subscriptions[body.pairId] = pairing.subscriptions;
+        else delete state.subscriptions[body.pairId];
         persist();
         return json(res, 200, { ok: true });
       }
@@ -513,12 +630,15 @@ export async function startRelay(opts: {
           return json(res, 400, { error: "pairId, requestId, payload required" });
         }
         const pairing = getPairing(body.pairId);
+        // A gateway retrying a request whose first answer it never got:
+        // the same request, not a new one — keep any decision it has.
+        if (pairing.requests.has(body.requestId)) return json(res, 200, { ok: true });
 
         const now = Date.now();
         pairing.recent = pairing.recent.filter((t) => now - t < RATE_WINDOW_MS);
         let undecided = 0;
         for (const entry of pairing.requests.values()) {
-          if (entry.decisions.length < entry.needed && now - entry.ts < REQUEST_TTL_MS) undecided++;
+          if (entry.decisions.length < entry.needed && now < entry.expiresAt) undecided++;
         }
         if (pairing.recent.length >= MAX_REQUESTS_PER_WINDOW || undecided >= MAX_UNDECIDED) {
           return json(res, 429, {
@@ -534,13 +654,18 @@ export async function startRelay(opts: {
         // the clear: how many answers to collect before hiding it from the
         // phones. It reveals that a quorum exists, not what is being asked.
         const needed = Math.min(10, Math.max(1, parseInt(String(body.needed ?? 1), 10) || 1));
+        // Gateways before 0.9.1 send no lifetime: the old 30 minutes.
+        const lifeSec = parseInt(String(body.ttlSec ?? ""), 10);
+        const expiresAt =
+          now + (Number.isFinite(lifeSec) ? Math.min(86400, Math.max(10, lifeSec)) * 1000 : REQUEST_TTL_MS);
         pairing.requests.set(body.requestId, {
           requestId: body.requestId,
           payload: body.payload,
-          ts: Date.now(),
+          ts: now,
           decisions: [],
           needed,
           waiters: [],
+          expiresAt,
         });
         // The sealed request rides along: the service worker on the phone
         // holds the pairing key and can show the real title — Web Push
@@ -554,7 +679,7 @@ export async function startRelay(opts: {
         });
         const ttl = Math.min(3600, Math.max(30, parseInt(String(body.ttlSec ?? PUSH_TTL_DEFAULT_SEC), 10) || PUSH_TTL_DEFAULT_SEC));
         pushAll(body.pairId, message, ttl);
-        notifyListeners(pairing, "request");
+        notifyListeners(pairing, "request", body.pairId);
         return json(res, 200, { ok: true });
       }
 
@@ -569,7 +694,7 @@ export async function startRelay(opts: {
           pairing.status = undefined;
           delete statuses[body.pairId];
           persist();
-          notifyListeners(pairing, "status");
+          notifyListeners(pairing, "status", body.pairId);
           return json(res, 200, { ok: true });
         }
         if (!body.payload || typeof body.payload !== "object") {
@@ -591,39 +716,67 @@ export async function startRelay(opts: {
         if (prev?.offlineAlerted) {
           pushAll(body.pairId, JSON.stringify({ type: "server", pairId: body.pairId, state: "online", since: prev.receivedAt }), 3600);
         }
-        notifyListeners(pairing, "status");
+        notifyListeners(pairing, "status", body.pairId);
         return json(res, 200, { ok: true });
       }
-      if (req.method === "GET" && url.pathname === "/api/status") {
-        const pairId = url.searchParams.get("pairId") ?? "";
-        if (!validId(pairId)) return json(res, 400, { error: "bad pairId" });
+      // `?pairIds=a,b,c` reads every vault of a device in one call: one
+      // phone with eight vaults used to make eight calls per refresh.
+      const batchIds = (): string[] | null => {
+        const many = url.searchParams.get("pairIds");
+        const list = many !== null ? many.split(",").filter(Boolean) : [url.searchParams.get("pairId") ?? ""];
+        if (!list.length || list.length > MAX_BATCH || !list.every(validId)) return null;
+        return [...new Set(list)];
+      };
+      const statusOf = (pairId: string) => {
         const st = getPairing(pairId).status;
-        if (!st) return json(res, 200, { status: null });
-        return json(res, 200, {
-          status: { payload: st.payload, receivedAt: st.receivedAt, intervalSec: st.intervalSec },
-          now: Date.now(),
-          quietAfterMs: quietAfterMs(st.intervalSec),
-        });
+        return st
+          ? {
+              status: { payload: st.payload, receivedAt: st.receivedAt, intervalSec: st.intervalSec },
+              quietAfterMs: quietAfterMs(st.intervalSec),
+            }
+          : { status: null };
+      };
+      if (req.method === "GET" && url.pathname === "/api/status") {
+        const ids = batchIds();
+        if (!ids) return json(res, 400, { error: "bad pairId" });
+        if (url.searchParams.has("pairIds")) {
+          const byPair: Record<string, unknown> = {};
+          for (const id of ids) byPair[id] = statusOf(id);
+          return json(res, 200, { byPair, now: Date.now() });
+        }
+        return json(res, 200, { ...statusOf(ids[0]!), now: Date.now() });
       }
 
       // SSE stream for open PWA pages: instant updates instead of polling.
       if (req.method === "GET" && url.pathname === "/api/events") {
-        const pairId = url.searchParams.get("pairId") ?? "";
-        if (!validId(pairId)) return json(res, 400, { error: "bad pairId" });
-        const pairing = getPairing(pairId);
+        const ids = batchIds();
+        if (!ids) return json(res, 400, { error: "bad pairId" });
+        const watched = ids.map(getPairing);
         res.writeHead(200, {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
           Connection: "keep-alive",
         });
         res.write("retry: 3000\n\n");
-        pairing.listeners.add(res);
+        for (const pairing of watched) {
+          // A cap that was declared and never applied: the oldest stream
+          // of a pairing makes way (a phone reopening the app leaves dead
+          // ones behind until the proxy notices).
+          if (pairing.listeners.size >= MAX_LISTENERS) {
+            const oldest = pairing.listeners.values().next().value as ServerResponse | undefined;
+            if (oldest) {
+              pairing.listeners.delete(oldest);
+              oldest.end();
+            }
+          }
+          pairing.listeners.add(res);
+        }
         // Heartbeat keeps proxies (and our own 90s read timeout) from
         // cutting an idle stream; EventSource ignores comment lines.
         const heartbeat = setInterval(() => res.write(": hb\n\n"), 25_000);
         req.on("close", () => {
           clearInterval(heartbeat);
-          pairing.listeners.delete(res);
+          for (const pairing of watched) pairing.listeners.delete(res);
         });
         return;
       }
@@ -637,24 +790,34 @@ export async function startRelay(opts: {
         }
         const pairing = getPairing(body.pairId);
         if (pairing.requests.delete(body.requestId)) {
-          notifyListeners(pairing, "decision");
+          notifyListeners(pairing, "decision", body.pairId);
         }
         return json(res, 200, { ok: true });
       }
 
       if (req.method === "GET" && url.pathname === "/api/pending") {
-        const pairId = url.searchParams.get("pairId") ?? "";
-        if (!validId(pairId)) return json(res, 400, { error: "bad pairId" });
-        const items = [...getPairing(pairId).requests.values()]
-          .filter((e) => e.decisions.length < e.needed)
-          .map((e) => ({
-            requestId: e.requestId,
-            payload: e.payload,
-            ts: e.ts,
-            decisions: e.decisions.length,
-            needed: e.needed,
-          }));
-        return json(res, 200, items);
+        const ids = batchIds();
+        if (!ids) return json(res, 400, { error: "bad pairId" });
+        const now = Date.now();
+        // Read-only: a lookup must not create a pairing for every id asked.
+        const itemsOf = (pairId: string) =>
+          [...(pairings.get(pairId)?.requests.values() ?? [])]
+            // Past its gateway's deadline nobody is listening: an answer
+            // would go nowhere, so the phones stop being shown it.
+            .filter((e) => e.decisions.length < e.needed && now < e.expiresAt)
+            .map((e) => ({
+              requestId: e.requestId,
+              payload: e.payload,
+              ts: e.ts,
+              decisions: e.decisions.length,
+              needed: e.needed,
+            }));
+        if (url.searchParams.has("pairIds")) {
+          const byPair: Record<string, unknown> = {};
+          for (const id of ids) byPair[id] = itemsOf(id);
+          return json(res, 200, { byPair });
+        }
+        return json(res, 200, itemsOf(ids[0]!));
       }
 
       if (req.method === "POST" && url.pathname === "/api/decision") {
@@ -670,7 +833,7 @@ export async function startRelay(opts: {
         metrics.decisions++;
         entry.decisions.push(body.payload);
         for (const waiter of entry.waiters.splice(0)) waiter(entry.decisions);
-        notifyListeners(getPairing(body.pairId), "decision");
+        notifyListeners(getPairing(body.pairId), "decision", body.pairId);
         return json(res, 200, { ok: true });
       }
 

@@ -9,10 +9,19 @@ infrastructure you own.
 ```
 ssh root@vps-prod
   → session pauses
-  → phone buzzes: "SSH login: root@vps-prod — from 203.0.113.7"
+  → phone buzzes: "SSH login: root@vps-prod"
+        From 203.0.113.7
+        Key: baltha@laptop · ED25519 SHA256:tpiQz5tz…
+        Server: vps-prod · 51.0.0.4
   → you tap Approve
   → shell opens
 ```
+
+The key line comes from sshd itself (`SSH_AUTH_INFO_0`, the key it has
+just verified), named by its comment in `authorized_keys`: your laptop's
+key and a key you do not recognise look different on the lock screen.
+It appears when a key was checked before the phone (key-only mode, or
+key logins in password mode).
 
 Deny closes the connection. So does silence, unless you say otherwise.
 

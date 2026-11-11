@@ -199,14 +199,29 @@ async function answerFromNotification(d, approved) {
     { requestId: d.requestId, approved: approved, ts: Date.now(), deviceId: store.deviceId },
     "dec:" + d.requestId
   );
-  var res = await fetch("/api/decision", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pairId: d.pairId, requestId: d.requestId, payload: payload }),
-  });
+  // Same patience as the page: a lock-screen tap often lands while the
+  // phone's network is still waking up.
+  var res = null;
+  for (var attempt = 0; attempt < 4; attempt++) {
+    if (attempt) await new Promise(function (r) { setTimeout(r, 700 * attempt); });
+    try {
+      res = await fetch("/api/decision", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pairId: d.pairId, requestId: d.requestId, payload: payload }),
+      });
+      if (res.ok || (res.status !== 429 && !(res.status >= 500))) break;
+    } catch (e) { res = null; }
+  }
+  var ok = !!res && res.ok;
+  var gone = !!res && res.status === 404;
   await self.registration.showNotification(
-    res.ok ? (approved ? "Approved" : "Denied") : "Could not send your answer",
-    { body: res.ok ? "" : "Open the app to try again.", tag: "sandgate-" + d.requestId, icon: "/icon-192.png" }
+    ok ? (approved ? "Approved" : "Denied") : gone ? "Too late" : "Could not send your answer",
+    {
+      body: ok ? "" : gone ? "That request had already expired or been answered." : "Open the app to try again.",
+      tag: "sandgate-" + d.requestId,
+      icon: "/icon-192.png",
+    }
   );
   await refreshPages();
 }
@@ -223,7 +238,7 @@ self.addEventListener("notificationclick", function (e) {
     if (clientList.length) {
       // The page was asleep: tell it to read the requests now, not when
       // its next poll comes round.
-      clientList[0].postMessage("refresh");
+      clientList[0].postMessage("open");
       return clientList[0].focus();
     }
     return self.clients.openWindow("/");
@@ -382,6 +397,18 @@ export const PWA_HTML = `<!doctype html>
   .d.answered { color: #7fbf9a; }
   .d.denied { color: #d98a76; }
   .d.expired { color: var(--soft); }
+  .hrow.tap { cursor: pointer; }
+  .hrow.open .t { white-space: normal; }
+  .hmore {
+    padding: 8px 10px 10px 84px; border-bottom: 1px solid var(--line);
+    color: #cfc6b2; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .jump {
+    position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+    z-index: 10; border: 0; border-radius: 999px; padding: 11px 18px;
+    background: var(--accent); color: #1a1408; font: 650 14.5px/1 inherit; font-family: inherit;
+    box-shadow: 0 6px 24px rgba(0,0,0,.45); cursor: pointer;
+  }
 
   .srv { padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
   .srv .top { display: flex; gap: 8px; align-items: center; }
@@ -855,7 +882,11 @@ export const PWA_HTML = `<!doctype html>
   var swRegPromise = "serviceWorker" in navigator
     ? navigator.serviceWorker.register("/sw.js").then(function (reg) {
         navigator.serviceWorker.addEventListener("message", function (e) {
+          // From a tapped notification: go straight to the card it was about.
+          // A push read in the background: refresh; the pill shows if the
+          // card lands off-screen — no jumping under your thumb.
           if (e.data === "refresh") fetchPending();
+          if (e.data === "open") { scrollToCards = true; fetchPending(); }
         });
         return reg;
       })
@@ -951,35 +982,39 @@ export const PWA_HTML = `<!doctype html>
   // --- live updates: SSE with a slow safety poll ---------------------------
   var sseOn = false;
   var streams = [];
+  // Every vault of this device, for the batched calls: one stream and one
+  // read per refresh, however many vaults. One per vault, with polls on
+  // top, is what ran a phone into the relay's rate limit.
+  function pairIdsParam() {
+    return pairs.map(function (p) { return encodeURIComponent(p.pairId); }).join(",");
+  }
   function connectEvents() {
-    if (!("EventSource" in window)) return;
+    if (!("EventSource" in window) || !pairs.length) return;
     streams.forEach(function (es) { try { es.close(); } catch (e) {} });
     streams = [];
-    pairs.forEach(function (p) {
-      var es = new EventSource("/api/events?pairId=" + encodeURIComponent(p.pairId));
-      es.addEventListener("request", fetchPending);
-      es.addEventListener("decision", fetchPending);
-      es.addEventListener("status", function () { fetchStatuses(); });
-      es.onopen = function () {
-        sseOn = true;
-        if (!pushOn) setStatus("live");
-        // Whatever happened while the stream was down was never announced:
-        // read it now, not at the next poll.
-        fetchPending();
-      };
-      es.onerror = function () {
-        // EventSource reconnects on its own (retry: 3000).
-        sseOn = false;
-        if (!pushOn) setStatus("polling", "warn");
-      };
-      streams.push(es);
-    });
+    var es = new EventSource("/api/events?pairIds=" + pairIdsParam());
+    es.addEventListener("request", fetchPending);
+    es.addEventListener("decision", fetchPending);
+    es.addEventListener("status", function () { fetchStatuses(); });
+    es.onopen = function () {
+      sseOn = true;
+      if (!pushOn) setStatus("live");
+      // Whatever happened while the stream was down was never announced:
+      // read it now, not at the next poll.
+      fetchPending();
+    };
+    es.onerror = function () {
+      // EventSource reconnects on its own (retry: 3000).
+      sseOn = false;
+      if (!pushOn) setStatus("polling", "warn");
+    };
+    streams.push(es);
   }
   connectEvents();
   // Polls stay on even with a live stream: a stream can look open while
   // the phone's network is long gone, and a missed card costs a login.
-  setInterval(function () { if (!document.hidden && !sseOn) fetchPending(); }, 4000);
-  setInterval(function () { if (!document.hidden) fetchPending(); }, 15000);
+  setInterval(function () { if (!document.hidden && !sseOn) fetchPending(); }, 5000);
+  setInterval(function () { if (!document.hidden) fetchPending(); }, 20000);
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) return;
     // Back from the background (a tap on a notification, usually): the
@@ -998,10 +1033,12 @@ export const PWA_HTML = `<!doctype html>
   function loadHist() {
     try { return JSON.parse(localStorage.getItem(HIST_KEY)) || []; } catch (e) { return []; }
   }
-  function recordHist(title, decision) {
+  function recordHist(title, decision, body) {
     var entries = loadHist();
-    entries.unshift({ t: title, d: decision, ts: Date.now() });
-    entries = entries.slice(0, 30);
+    // The body too: who, from where, which key. A row cut at the screen's
+    // edge with no way to read the rest told you nothing afterwards.
+    entries.unshift({ t: title, d: decision, ts: Date.now(), b: body ? String(body).slice(0, 600) : undefined });
+    entries = entries.slice(0, 50);
     try { localStorage.setItem(HIST_KEY, JSON.stringify(entries)); } catch (e) {}
     renderHist();
   }
@@ -1021,11 +1058,21 @@ export const PWA_HTML = `<!doctype html>
     h.textContent = "Recent — this device";
     section.appendChild(h);
     entries.forEach(function (entry) {
-      var row = document.createElement("div"); row.className = "hrow";
+      var row = document.createElement("div"); row.className = "hrow tap";
       var time = document.createElement("span"); time.className = "time"; time.textContent = histTime(entry.ts);
       var t = document.createElement("span"); t.className = "t"; t.textContent = entry.t;
       var d = document.createElement("span"); d.className = "d " + entry.d; d.textContent = entry.d;
       row.appendChild(time); row.appendChild(t); row.appendChild(d);
+      // Tap to unfold: the full title, the details, the exact time.
+      row.onclick = function () {
+        var open = row.nextSibling && row.nextSibling.className === "hmore";
+        if (open) { row.nextSibling.remove(); row.classList.remove("open"); return; }
+        var more = document.createElement("div"); more.className = "hmore";
+        more.textContent =
+          entry.t + (entry.b ? "\\n" + entry.b : "") + "\\n" + new Date(entry.ts).toLocaleString() + " — " + entry.d;
+        row.parentNode.insertBefore(more, row.nextSibling);
+        row.classList.add("open");
+      };
       section.appendChild(row);
     });
     histEl.appendChild(section);
@@ -1047,6 +1094,45 @@ export const PWA_HTML = `<!doctype html>
       emptyEl = null;
     }
   }
+
+  // A request arriving while you are scrolled down to the history or the
+  // servers was invisible: cards sit at the top. A pill says so and takes
+  // you there; coming back to the app (a tap on a notification) scrolls
+  // to the waiting card by itself.
+  var jumpEl = null;
+  var scrollToCards = false;
+  function liveCards() {
+    var list = [];
+    for (var k in cards) if (cards[k] && !cards[k].done) list.push(cards[k]);
+    return list;
+  }
+  function updateJumpPill() {
+    var live = liveCards();
+    var first = live.length ? live[0].el : null;
+    var r = first ? first.getBoundingClientRect() : null;
+    var offscreen = !!r && (r.bottom < 40 || r.top > window.innerHeight - 40);
+    if (live.length && offscreen) {
+      if (!jumpEl) {
+        jumpEl = document.createElement("button");
+        jumpEl.className = "jump";
+        jumpEl.onclick = function () { revealCards(); };
+        document.body.appendChild(jumpEl);
+      }
+      jumpEl.textContent = "↑ " + live.length + (live.length > 1 ? " requests waiting" : " request waiting");
+    } else if (jumpEl) {
+      jumpEl.remove();
+      jumpEl = null;
+    }
+  }
+  function revealCards() {
+    var live = liveCards();
+    if (!live.length) return;
+    try { live[0].el.scrollIntoView({ behavior: "smooth", block: "start" }); }
+    catch (e) { window.scrollTo(0, 0); }
+    setTimeout(updateJumpPill, 600);
+  }
+  window.addEventListener("scroll", function () { updateJumpPill(); }, { passive: true });
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) scrollToCards = true; });
 
   // Push, SSE and the safety poll all trigger refreshes, and they arrive
   // together. Two of them used to race in the gap between "do I have this
@@ -1084,14 +1170,19 @@ export const PWA_HTML = `<!doctype html>
     var seen = {};
     var answeredBy = {};
     var failed = false;
-    await Promise.all(pairs.map(async function (p) {
-      var raw;
+    var byPair = null;
+    if (pairs.length) {
       try {
-        var res = await fetch("/api/pending?pairId=" + encodeURIComponent(p.pairId));
+        var res = await fetch("/api/pending?pairIds=" + pairIdsParam());
         if (!res.ok) throw new Error("HTTP " + res.status);
-        raw = await res.json();
-        if (!Array.isArray(raw)) throw new Error("not a list");
-      } catch (e) { failed = true; return; }
+        var body = await res.json();
+        if (!body || typeof body.byPair !== "object" || body.byPair === null) throw new Error("not a list");
+        byPair = body.byPair;
+      } catch (e) { failed = true; }
+    }
+    await Promise.all(pairs.map(async function (p) {
+      var raw = byPair && byPair[p.pairId];
+      if (!Array.isArray(raw)) return; // no answer for this vault: keep its cards
       answeredBy[p.pairId] = true;
       for (var i = 0; i < raw.length; i++) {
         // Still open for the other devices of a quorum; done for this one.
@@ -1121,6 +1212,9 @@ export const PWA_HTML = `<!doctype html>
     }
     ensureEmpty(activeCount() === 0);
     if (failed) scheduleRetry(); else retryDelay = 1500;
+    if (scrollToCards && liveCards().length) { scrollToCards = false; revealCards(); }
+    else if (!failed) scrollToCards = false;
+    updateJumpPill();
   }
 
   function activeCount() {
@@ -1245,7 +1339,7 @@ export const PWA_HTML = `<!doctype html>
         if (c.inputEl) c.inputEl.disabled = true;
         c.leftEl.textContent = "expired — denied";
         c.fillEl.style.width = "0%";
-        recordHist(histLabel(c), "expired");
+        recordHist(histLabel(c), "expired", c.req.body);
       }
       return;
     }
@@ -1266,29 +1360,68 @@ export const PWA_HTML = `<!doctype html>
     return b;
   }
 
+  function sleepMs(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  /**
+   * POST a decision, riding out what a phone's network does: a dropped
+   * request, a relay restarting, a 429 or 5xx from the proxy. The same
+   * sealed answer is sent again — the relay ignores a repeat once it has
+   * enough. Returns the final response, or throws after the last try.
+   */
+  async function postDecision(pairId, requestId, payload) {
+    var lastErr = null;
+    for (var attempt = 0; attempt < 5; attempt++) {
+      if (attempt) await sleepMs(Math.min(4000, 600 * Math.pow(2, attempt - 1)));
+      try {
+        var res = await fetch("/api/decision", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pairId: pairId, requestId: requestId, payload: payload }),
+        });
+        if (res.status === 429 || res.status >= 500) { lastErr = new Error("relay answered HTTP " + res.status); continue; }
+        return res;
+      } catch (e) { lastErr = e; }
+    }
+    throw lastErr || new Error("relay unreachable");
+  }
+
   async function submitDecision(id, decisionBody, histDecision, btn) {
     var c = cards[id];
-    if (!c || c.done) return;
-    btn.disabled = true;
-    try {
-      decisionBody.deviceId = deviceId;
-      var payload = await sealPayload(c.pair, decisionBody, "dec:" + c.requestId);
-      var res = await fetch("/api/decision", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pairId: c.pair.pairId, requestId: c.requestId, payload: payload }),
-      });
-      if (!res.ok) throw new Error("relay answered HTTP " + res.status);
+    if (!c || c.done || c.sending) return;
+    // The whole card, not just the tapped button: tapping Deny while an
+    // Approve is still in flight sent both.
+    c.sending = true;
+    c.el.querySelectorAll("button").forEach(function (b) { b.disabled = true; });
+    var label = btn.querySelector("span");
+    var was = label ? label.textContent : "";
+    if (label) label.textContent = "Sending…";
+    function retire(outcome) {
       markAnswered(c.requestId);
       if (cards[id]) {
-        recordHist(histLabel(c), histDecision);
+        recordHist(histLabel(c), outcome, c.req.body);
         cards[id].el.remove();
         delete cards[id];
       }
       ensureEmpty(activeCount() === 0);
+      updateJumpPill();
+    }
+    try {
+      decisionBody.deviceId = deviceId;
+      var payload = await sealPayload(c.pair, decisionBody, "dec:" + c.requestId);
+      var res = await postDecision(c.pair.pairId, c.requestId, payload);
+      if (res.status === 404) {
+        // Gone from the relay: it expired, the agent stopped waiting, or
+        // another device answered. Nothing to send to — not an error.
+        retire("expired");
+        return;
+      }
+      if (!res.ok) throw new Error("relay answered HTTP " + res.status);
+      retire(histDecision);
     } catch (err) {
-      btn.disabled = false;
-      alert("Could not send your decision: " + (err && err.message ? err.message : err));
+      c.sending = false;
+      if (label) label.textContent = was;
+      c.el.querySelectorAll("button").forEach(function (b) { b.disabled = false; });
+      alert("Could not send your decision (" + (err && err.message ? err.message : err) + "). Check your connection and tap again.");
     }
   }
 
@@ -1321,7 +1454,20 @@ export const PWA_HTML = `<!doctype html>
         if (!confirm("Remove " + p.name + " from this device?")) return;
         pairs.splice(idx, 1);
         savePairs();
-        location.reload();
+        // Stop this device ringing for it: the relay kept pushing a removed
+        // vault's requests (and its server alerts) to the lock screen.
+        swRegPromise
+          .then(function (reg) { return reg && reg.pushManager ? reg.pushManager.getSubscription() : null; })
+          .then(function (sub) {
+            if (!sub) return;
+            return fetch("/api/unsubscribe", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ pairId: p.pairId, endpoint: sub.endpoint }),
+            });
+          })
+          .catch(function () {})
+          .then(function () { location.reload(); });
       };
       row.appendChild(t); row.appendChild(x);
       section.appendChild(row);
@@ -1396,21 +1542,28 @@ export const PWA_HTML = `<!doctype html>
   }
 
   var statusBusy = false;
+  var statusQueued = false;
   async function fetchStatuses() {
-    if (statusBusy) return;
+    // A "status" event during a read must not be lost: read again after.
+    if (statusBusy) { statusQueued = true; return; }
     statusBusy = true;
     try {
       if (!latestVersion) {
         try { latestVersion = (await (await fetch("/api/health")).json()).version || null; } catch (e) {}
       }
+      if (!pairs.length) return;
+      var all;
+      try {
+        var res = await fetch("/api/status?pairIds=" + pairIdsParam());
+        if (!res.ok) return; // keep what we had: a failed read is not news
+        all = await res.json();
+      } catch (e) { return; }
+      if (!all || !all.byPair) return;
       await Promise.all(pairs.map(async function (p) {
-        var data;
-        try {
-          var res = await fetch("/api/status?pairId=" + encodeURIComponent(p.pairId));
-          if (!res.ok) return; // keep what we had: a failed read is not news
-          data = await res.json();
-        } catch (e) { return; }
-        if (!data || !data.status) { delete statuses[p.pairId]; return; }
+        var entry = all.byPair[p.pairId];
+        if (!entry) return;
+        var data = { status: entry.status, quietAfterMs: entry.quietAfterMs, now: all.now };
+        if (!data.status) { delete statuses[p.pairId]; return; }
         try {
           var st = await openSealed(p, data.status.payload, "status:" + p.pairId);
           if (!st || st.v !== 1) return;
@@ -1426,6 +1579,7 @@ export const PWA_HTML = `<!doctype html>
     } finally {
       statusBusy = false;
       renderServers();
+      if (statusQueued) { statusQueued = false; fetchStatuses(); }
     }
   }
 

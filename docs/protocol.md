@@ -69,15 +69,38 @@ their requests together.
 ```
 POST /api/hello        { pairId }                       announce presence
 GET  /api/pending?pairId=<id>                           → [ { requestId, payload, ts, decisions, needed } ]
-POST /api/decision     { pairId, requestId, payload }    → 200
-GET  /api/events?pairId=<id>                            Server-Sent Events: "request", "decision"
+GET  /api/pending?pairIds=<id>,<id>,…                   → { byPair: { <id>: [ … ] } }   (≤ 64 ids)
+POST /api/decision     { pairId, requestId, payload }    → 200 | 404 (expired, abandoned, unknown)
+GET  /api/events?pairId=<id>  |  ?pairIds=<id>,…        Server-Sent Events: "request", "decision", "status"
+                                                        data: { "pairId": … } names the vault that changed
 POST /api/subscribe    { pairId, subscription }          Web Push only (see §5)
+POST /api/unsubscribe  { pairId, endpoint }              this device stops ringing for that vault
 ```
 
-Poll `/api/pending` on load and whenever an SSE event arrives; fall back
-to polling every few seconds if SSE is unavailable. A request stays
-listed until enough decisions arrive (`decisions` of `needed`), so a
-client must remember which ones **it** answered and stop showing those.
+A device with several vaults should use the `pairIds` forms: one stream
+and one read, whatever the number of vaults. Poll `/api/pending` on load,
+whenever an SSE event arrives and whenever the stream (re)opens; keep a
+slow poll even with a live stream (a stream can look open on a dead
+network). A failed read says nothing about the requests: keep showing
+them. A request stays listed until enough decisions arrive (`decisions`
+of `needed`) or until it expires, so a client must remember which ones
+**it** answered and stop showing those.
+
+The gateway posts `{ pairId, requestId, payload, needed, ttlSec }` to
+`/api/request`. `ttlSec` is how long it will wait: past it the request is
+no longer listed nor counted against the pairing's limit (a gateway
+killed mid-wait never calls `/api/abandon`). Posting the same
+`requestId` again is a no-op, so a gateway may retry a request whose
+answer it never received.
+
+**Retrying.** A 5xx, a dropped connection and a `429` whose body says
+`"retryable": true` (the per-address limit) are transient: retry with
+backoff, with the same sealed payload. A `429` without it is the
+per-pairing flood guard, and final. The per-address limit applies only
+to calls about pairings the relay does not know in use; the client
+address is the peer, or `CF-Connecting-IP` from Cloudflare's published
+ranges or a local proxy, or the first `X-Forwarded-For` hop from a local
+proxy.
 
 **Request plaintext** (sealed, AAD `req:<requestId>`):
 
