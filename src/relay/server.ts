@@ -30,7 +30,12 @@ interface RelayRequestEntry {
 }
 
 interface Pairing {
-  subscription?: webpush.PushSubscription;
+  /**
+   * Every device that switched notifications on for this vault. One per
+   * pairing used to be the rule, so a second device silently took the
+   * pushes away from the first.
+   */
+  subscriptions: webpush.PushSubscription[];
   requests: Map<string, RelayRequestEntry>;
   /** Timestamps of recent requests, for the per-pairing rate limit. */
   recent: number[];
@@ -64,6 +69,14 @@ const MAX_REQUESTS_PER_WINDOW = 12;
 const MAX_UNDECIDED = 5;
 /** Open event streams kept per pairing; a phone needs one, maybe two. */
 const MAX_LISTENERS = 8;
+/** Devices that can receive pushes for one pairing; the oldest goes first. */
+const MAX_SUBSCRIPTIONS = 8;
+/**
+ * How long a push service keeps trying to deliver. Without it web-push
+ * asks for four weeks, and a phone back online hours later rings for a
+ * request that died long ago. Gateways send the request's own timeout.
+ */
+const PUSH_TTL_DEFAULT_SEC = 600;
 
 /**
  * Per-address limit, on top of the per-pairing one: the pairing limit
@@ -99,10 +112,12 @@ export async function startRelay(opts: {
 
   let state: {
     vapid: { publicKey: string; privateKey: string };
-    subscriptions: Record<string, webpush.PushSubscription>;
+    /** One device per pairing in older state files, a list since. */
+    subscriptions: Record<string, webpush.PushSubscription | webpush.PushSubscription[]>;
   };
   if (existsSync(statePath)) {
     state = JSON.parse(readFileSync(statePath, "utf8"));
+    state.subscriptions ??= {};
   } else {
     const keys = webpush.generateVAPIDKeys();
     state = { vapid: keys, subscriptions: {} };
@@ -158,8 +173,9 @@ export async function startRelay(opts: {
   const getPairing = (pairId: string): Pairing => {
     let p = pairings.get(pairId);
     if (!p) {
+      const stored = state.subscriptions[pairId];
       p = {
-        subscription: state.subscriptions[pairId],
+        subscriptions: !stored ? [] : Array.isArray(stored) ? [...stored] : [stored],
         requests: new Map(),
         listeners: new Set(),
         recent: [],
@@ -189,7 +205,7 @@ export async function startRelay(opts: {
     const idleCutoff = Date.now() - 60 * 60 * 1000;
     for (const [id, p] of pairings) {
       const empty =
-        !p.subscription && !p.claim && p.requests.size === 0 && p.listeners.size === 0;
+        !p.subscriptions.length && !p.claim && p.requests.size === 0 && p.listeners.size === 0;
       const idle = !p.lastSeen || p.lastSeen < idleCutoff;
       if (empty && idle && !(p.claimedAt && p.claimedAt > idleCutoff)) pairings.delete(id);
     }
@@ -239,12 +255,14 @@ export async function startRelay(opts: {
     const url = new URL(req.url ?? "/", "http://localhost");
     try {
       // --- static PWA ---
+      // no-cache: a fix to the page or the worker must reach the phone on
+      // its next load, not whenever a cache in between decides.
       if (req.method === "GET" && url.pathname === "/") {
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
         return res.end(PWA_HTML);
       }
       if (req.method === "GET" && url.pathname === "/sw.js") {
-        res.writeHead(200, { "Content-Type": "application/javascript" });
+        res.writeHead(200, { "Content-Type": "application/javascript", "Cache-Control": "no-cache" });
         return res.end(PWA_SW);
       }
       if (req.method === "GET" && url.pathname === "/manifest.webmanifest") {
@@ -346,8 +364,14 @@ export async function startRelay(opts: {
         if (!validId(body.pairId) || !body.subscription?.endpoint) {
           return json(res, 400, { error: "pairId and subscription required" });
         }
-        getPairing(body.pairId).subscription = body.subscription;
-        state.subscriptions[body.pairId] = body.subscription;
+        const pairing = getPairing(body.pairId);
+        const sub = body.subscription as webpush.PushSubscription;
+        // Same endpoint = same device: replace it (its keys may have
+        // rotated), and keep it last as the most recently seen.
+        pairing.subscriptions = pairing.subscriptions.filter((s) => s.endpoint !== sub.endpoint);
+        pairing.subscriptions.push(sub);
+        while (pairing.subscriptions.length > MAX_SUBSCRIPTIONS) pairing.subscriptions.shift();
+        state.subscriptions[body.pairId] = pairing.subscriptions;
         persist();
         return json(res, 200, { ok: true });
       }
@@ -367,8 +391,8 @@ export async function startRelay(opts: {
         const pairing = getPairing(pairId);
         const claimLive = !!pairing.claim && Date.now() - pairing.claim.ts < claimTtl;
         return json(res, 200, {
-          subscribed: !!pairing.subscription,
-          seen: !!pairing.lastSeen || !!pairing.subscription,
+          subscribed: pairing.subscriptions.length > 0,
+          seen: !!pairing.lastSeen || pairing.subscriptions.length > 0,
           claimed: !!pairing.claimedAt,
           claimPending: claimLive,
         });
@@ -438,28 +462,38 @@ export async function startRelay(opts: {
           needed,
           waiters: [],
         });
-        if (pairing.subscription) {
-          // The sealed request rides along: the service worker on the
-          // phone holds the pairing key and can show the real title —
-          // Web Push payloads are end-to-end encrypted (RFC 8291), so
-          // Apple and Google see nothing. The relay still reads nothing.
+        // The sealed request rides along: the service worker on the phone
+        // holds the pairing key and can show the real title — Web Push
+        // payloads are end-to-end encrypted (RFC 8291), so Apple and Google
+        // see nothing. The relay still reads nothing.
+        const message = JSON.stringify({
+          type: "approval",
+          pairId: body.pairId,
+          requestId: body.requestId,
+          payload: body.payload,
+        });
+        const ttl = Math.min(3600, Math.max(30, parseInt(String(body.ttlSec ?? PUSH_TTL_DEFAULT_SEC), 10) || PUSH_TTL_DEFAULT_SEC));
+        for (const sub of [...pairing.subscriptions]) {
           webpush
-            .sendNotification(
-              pairing.subscription,
-              JSON.stringify({
-                type: "approval",
-                pairId: body.pairId,
-                requestId: body.requestId,
-                payload: body.payload,
-              })
-            )
+            // urgency high: someone is waiting on the other end. At the
+            // default "normal", Apple delivers at low priority and an
+            // iPhone saving battery holds it back or drops it.
+            .sendNotification(sub, message, { TTL: ttl, urgency: "high" })
             .then(() => {
               metrics.pushSent++;
             })
             .catch((err: any) => {
               metrics.pushFailed++;
-              // Phone offline / stale sub is normal (PWA polls anyway), but
-              // ops must be able to SEE a push service rejecting us.
+              // 404/410: the push service forgot this device (app removed,
+              // notifications switched off). Stop sending into the void.
+              if (err?.statusCode === 404 || err?.statusCode === 410) {
+                pairing.subscriptions = pairing.subscriptions.filter((s) => s.endpoint !== sub.endpoint);
+                if (pairing.subscriptions.length) state.subscriptions[body.pairId] = pairing.subscriptions;
+                else delete state.subscriptions[body.pairId];
+                persist();
+              }
+              // Phone offline is normal (the PWA polls anyway), but ops must
+              // be able to SEE a push service rejecting us.
               console.error(
                 `[push] delivery failed (HTTP ${err?.statusCode ?? "?"}): ${String(err?.body ?? err).slice(0, 200)}`
               );

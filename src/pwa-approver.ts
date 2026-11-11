@@ -95,7 +95,9 @@ export class PwaApprover implements Approver {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pairId: this.config.pairId, requestId, payload: sealed, needed: quorum }),
+        // ttlSec: past the timeout, a push is worthless — the push service
+        // may drop it instead of delivering it hours later.
+        body: JSON.stringify({ pairId: this.config.pairId, requestId, payload: sealed, needed: quorum, ttlSec: req.timeoutSec }),
       },
       15
     );

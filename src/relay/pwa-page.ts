@@ -198,7 +198,12 @@ self.addEventListener("notificationclick", function (e) {
   }
   e.waitUntil((async function () {
     var clientList = await self.clients.matchAll({ type: "window" });
-    if (clientList.length) return clientList[0].focus();
+    if (clientList.length) {
+      // The page was asleep: tell it to read the requests now, not when
+      // its next poll comes round.
+      clientList[0].postMessage("refresh");
+      return clientList[0].focus();
+    }
     return self.clients.openWindow("/");
   })());
 });
@@ -909,8 +914,11 @@ export const PWA_HTML = `<!doctype html>
 
   // --- live updates: SSE with a slow safety poll ---------------------------
   var sseOn = false;
+  var streams = [];
   function connectEvents() {
     if (!("EventSource" in window)) return;
+    streams.forEach(function (es) { try { es.close(); } catch (e) {} });
+    streams = [];
     pairs.forEach(function (p) {
       var es = new EventSource("/api/events?pairId=" + encodeURIComponent(p.pairId));
       es.addEventListener("request", fetchPending);
@@ -918,17 +926,33 @@ export const PWA_HTML = `<!doctype html>
       es.onopen = function () {
         sseOn = true;
         if (!pushOn) setStatus("live");
+        // Whatever happened while the stream was down was never announced:
+        // read it now, not at the next poll.
+        fetchPending();
       };
       es.onerror = function () {
         // EventSource reconnects on its own (retry: 3000).
+        sseOn = false;
         if (!pushOn) setStatus("polling", "warn");
       };
+      streams.push(es);
     });
   }
   connectEvents();
-  setInterval(function () { if (!document.hidden && !sseOn) fetchPending(); }, 8000);
-  setInterval(function () { if (!document.hidden) fetchPending(); }, 45000); // safety net
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) fetchPending(); });
+  // Polls stay on even with a live stream: a stream can look open while
+  // the phone's network is long gone, and a missed card costs a login.
+  setInterval(function () { if (!document.hidden && !sseOn) fetchPending(); }, 4000);
+  setInterval(function () { if (!document.hidden) fetchPending(); }, 15000);
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) return;
+    // Back from the background (a tap on a notification, usually): the
+    // phone may have suspended the streams without closing them. Reopen
+    // them, and read now — the retry covers a network still waking up.
+    connectEvents();
+    fetchPending();
+  });
+  window.addEventListener("pageshow", function (e) { if (e.persisted) { connectEvents(); fetchPending(); } });
+  window.addEventListener("online", fetchPending);
 
   // --- local decision history (on-device only; synced history is a paid
   // --- gateway feature, not the PWA's business) ----------------------------
@@ -1006,13 +1030,32 @@ export const PWA_HTML = `<!doctype html>
     }
   }
 
+  // A failed fetch says nothing about the cards: the network is waking up,
+  // the relay restarting, an error page from the proxy. Treating it as "no
+  // requests" made cards vanish and come back a refresh later; now only a
+  // vault that actually answered can retire its cards, and a failure is
+  // retried within seconds instead of waiting for the next poll.
+  var retryTimer = null;
+  var retryDelay = 1500;
+  function scheduleRetry() {
+    if (retryTimer) return;
+    retryTimer = setTimeout(function () { retryTimer = null; fetchPending(); }, retryDelay);
+    retryDelay = Math.min(15000, retryDelay * 2);
+  }
+
   async function refreshOnce() {
     var seen = {};
+    var answeredBy = {};
+    var failed = false;
     await Promise.all(pairs.map(async function (p) {
       var raw;
       try {
-        raw = await (await fetch("/api/pending?pairId=" + encodeURIComponent(p.pairId))).json();
-      } catch (e) { return; }
+        var res = await fetch("/api/pending?pairId=" + encodeURIComponent(p.pairId));
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        raw = await res.json();
+        if (!Array.isArray(raw)) throw new Error("not a list");
+      } catch (e) { failed = true; return; }
+      answeredBy[p.pairId] = true;
       for (var i = 0; i < raw.length; i++) {
         // Still open for the other devices of a quorum; done for this one.
         if (answered.indexOf(raw[i].requestId) >= 0) continue;
@@ -1030,10 +1073,17 @@ export const PWA_HTML = `<!doctype html>
         }
       }
     }));
+    var known = {};
+    pairs.forEach(function (p) { known[p.pairId] = true; });
     for (var cid in cards) {
-      if (!seen[cid] && cards[cid]) { cards[cid].el.remove(); delete cards[cid]; }
+      // Retire a card when its vault answered without it — or is gone.
+      var owner = cards[cid] && cards[cid].pair.pairId;
+      if (!seen[cid] && cards[cid] && (answeredBy[owner] || !known[owner])) {
+        cards[cid].el.remove(); delete cards[cid];
+      }
     }
     ensureEmpty(activeCount() === 0);
+    if (failed) scheduleRetry(); else retryDelay = 1500;
   }
 
   function activeCount() {
