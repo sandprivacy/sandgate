@@ -98,9 +98,10 @@ answer it never received.
 backoff, with the same sealed payload. A `429` without it is the
 per-pairing flood guard, and final. The per-address limit applies only
 to calls about pairings the relay does not know in use; the client
-address is the peer, or `CF-Connecting-IP` from Cloudflare's published
-ranges or a local proxy, or the first `X-Forwarded-For` hop from a local
-proxy.
+address is the peer; from Cloudflare's published ranges,
+`CF-Connecting-IP`; from a local proxy, the rightmost `X-Forwarded-For`
+hop that is not a private address (and `CF-Connecting-IP` when that hop
+is Cloudflare's). Never the leftmost hop: the client writes that one.
 
 **Request plaintext** (sealed, AAD `req:<requestId>`):
 
@@ -214,8 +215,8 @@ credentials. Two honest options, neither of which weakens the channel:
 ```
 GET  /api/pair-status?pairId=<id>   { subscribed, seen, claimed, claimPending }
 POST /api/abandon { pairId, requestId }   a gateway that stopped waiting
-GET  /api/health                    { ok, version, uptime_sec, pairings, active_requests }
-GET  /api/metrics                   Prometheus text
+GET  /api/health                    { ok, version }
+GET  /api/metrics                   Prometheus text, operator only: Authorization: Bearer <token>, else 404
 ```
 
 Server heartbeats (`sandgate ssh-guard heartbeat`, every 5 minutes):

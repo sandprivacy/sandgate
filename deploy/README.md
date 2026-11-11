@@ -56,10 +56,23 @@ sudo systemctl enable --now sandgate-relay
 
 ## Watching it
 
-- `GET /api/health` — `{ok, uptime_sec, pairings, active_requests}` for an uptime check.
-- `GET /api/metrics` — Prometheus text: requests, decisions, push sent/failed, claims issued/collected, rate-limited calls, active requests, pairings. Nothing per user.
+- `GET /api/health` — `{ok, version}` for an uptime check. Public, so it says nothing about use.
+- `GET /api/metrics` — Prometheus text: requests, decisions, push sent/failed, claims issued/collected, rate-limited calls, active requests, pairings, uptime. Nothing per user. **Off unless you set a token**, and then only with it:
+
+  ```bash
+  openssl rand -hex 32                       # once; keep it with your secrets
+  # systemd: Environment=SANDGATE_METRICS_TOKEN=…   docker: -e SANDGATE_METRICS_TOKEN=…
+  curl -H "Authorization: Bearer $TOKEN" https://relay.sandgate.dev/api/metrics
+  ```
+
+  Without the token, with a wrong one, or with none configured, the answer is the same 404. Wrong tokens count against the caller's per-address limit. A token shorter than 24 characters is refused at startup (metrics stay off, and the log says so). The header only: a token in a URL ends up in access logs. Before 0.9.1 these counters were public, which told anyone how much the relay was used and told an attacker whether their flood was being refused.
 - Rate limits: 12 requests/min and 5 undecided (unexpired) per pairing, against flooding a phone; 240 API calls/min per client address for pairings not in use, against invented pair ids. Calls about pairings in use are not counted there. `sandgate_relay_rate_limited_total` climbing fast means real clients are being refused — look at how the relay sees addresses.
-- Client addresses: behind Cloudflare (proxied DNS straight to the VPS, or cloudflared on the host), the relay takes `CF-Connecting-IP` when the connection comes from Cloudflare's published ranges or from a local proxy. Behind another proxy on the host or the private network, the first `X-Forwarded-For` hop. Anything else connecting directly is taken at its own address. Before 0.9.1, Cloudflare's edge was not recognised: every phone, gateway and server shared a few edge addresses and one limit.
+- Client addresses:
+  - From Cloudflare's published ranges (proxied DNS straight to the relay port): `CF-Connecting-IP`, which Cloudflare sets itself.
+  - From a proxy on the host or the private network (nginx, Caddy, cloudflared): `X-Forwarded-For` **read from the right**, past the private addresses of your own proxies. A proxy appends what it saw after whatever the client wrote, so only the right end is trustworthy; before 0.9.1 the relay read the first entry, which any client could choose. If that hop is a Cloudflare address (nginx behind Cloudflare), `CF-Connecting-IP` names the client; reached directly, nginx's copy of that header is ignored.
+  - Anything else connecting directly is taken at its own address; header values that are not addresses are ignored.
+  - A TCP-level forwarder that rewrites no headers (socat, docker's userland proxy on loopback) makes every client look local, forged headers included. Publish the port normally (docker's default for outside traffic keeps the real address) or put an HTTP proxy in front.
+  - Before 0.9.1, Cloudflare's edge was not recognised: every phone, gateway and server shared a few edge addresses and one limit.
 
 ## Upgrading
 

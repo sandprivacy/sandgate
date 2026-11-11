@@ -42,6 +42,28 @@ test("the client behind Cloudflare is the client, and nobody else can say so", (
   assert.equal(clientAddress("203.0.113.66", { "cf-connecting-ip": "1.2.3.4", "x-forwarded-for": "1.2.3.4" }), "203.0.113.66");
 });
 
+test("behind nginx, a client cannot pick its address by writing X-Forwarded-For first", () => {
+  // nginx appends what it saw: the client's own text stays on the left.
+  assert.equal(clientAddress("127.0.0.1", { "x-forwarded-for": "6.6.6.6, 198.51.100.9" }), "198.51.100.9");
+  assert.equal(clientAddress("127.0.0.1", { "x-forwarded-for": "10.0.0.1, 198.51.100.9" }), "198.51.100.9");
+  // Two proxies of ours (nginx, then a docker bridge): skip both.
+  assert.equal(clientAddress("172.17.0.1", { "x-forwarded-for": "6.6.6.6, 198.51.100.9, 172.17.0.1" }), "198.51.100.9");
+  // nginx reached by Cloudflare: the hop is an edge, the client is Cloudflare's header.
+  assert.equal(
+    clientAddress("127.0.0.1", { "cf-connecting-ip": "198.51.100.9", "x-forwarded-for": "198.51.100.9, 172.70.1.2" }),
+    "198.51.100.9"
+  );
+  // nginx reached directly, bypassing Cloudflare: its CF header is a lie.
+  assert.equal(
+    clientAddress("127.0.0.1", { "cf-connecting-ip": "1.2.3.4", "x-forwarded-for": "1.2.3.4, 203.0.113.66" }),
+    "203.0.113.66"
+  );
+  // Header junk is never an address.
+  assert.equal(clientAddress("127.0.0.1", { "x-forwarded-for": "evil, <script>" }), "127.0.0.1");
+  assert.equal(clientAddress("172.70.1.2", { "cf-connecting-ip": "not an ip" }), "172.70.1.2");
+  assert.equal(clientAddress("127.0.0.1", { "x-forwarded-for": "198.51.100.9, junk" }), "127.0.0.1");
+});
+
 test("a vault in use is never refused for its address; invented ids still are", async () => {
   await withRelay(async (url) => {
     const { pairId } = newPairing();

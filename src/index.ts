@@ -514,7 +514,10 @@ async function cmdRelay(portArg?: string): Promise<void> {
   });
   console.log(
     `sandgate relay listening on http://localhost:${relay.port}\n` +
-      `Behind TLS (required for phone push), pair with: sandgate pair https://your-relay-host`
+      `Behind TLS (required for phone push), pair with: sandgate pair https://your-relay-host\n` +
+      (relay.metricsEnabled
+        ? "Metrics: /api/metrics, with Authorization: Bearer <SANDGATE_METRICS_TOKEN>"
+        : "Metrics: off (set SANDGATE_METRICS_TOKEN to enable /api/metrics)")
   );
 }
 

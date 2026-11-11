@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
+import { createHash, timingSafeEqual } from "node:crypto";
 import webpush from "web-push";
 import { PWA_HTML, PWA_SW, pwaManifest } from "./pwa-page.js";
 import { ICON_SVG, iconPng } from "./icons.js";
@@ -170,20 +171,68 @@ export function inRange(addr: string, cidr: string): boolean {
 const fromLocalProxy = (addr: string): boolean =>
   /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|::ffff:(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)|f[cd][0-9a-f]{2}:)/i.test(addr);
 
+const fromCloudflare = (addr: string): boolean => CLOUDFLARE_RANGES.some((r) => inRange(addr, r));
+
+/** A literal address, or nothing: header junk never becomes a rate-limit key. */
+const literalIp = (s: unknown): string | null => {
+  const t = typeof s === "string" ? s.trim() : "";
+  return t && ipToBigInt(t) ? t : null;
+};
+
 /**
  * Who is calling. A stranger connecting straight to the port is who it
- * is: their forged headers would be a free pass around the limit. A
- * local proxy may name the client (X-Forwarded-For, or Cloudflare's
- * header when cloudflared runs here); Cloudflare's edge may too.
+ * is: their forged headers would be a free pass around the limit.
+ *
+ * Cloudflare's edge names the client in CF-Connecting-IP, which it sets
+ * itself. A proxy on this host or network (nginx, Caddy, cloudflared)
+ * APPENDS the address it saw to X-Forwarded-For, after whatever the
+ * client wrote there: only the right end is the proxy's word, so the
+ * header is read from the right, past our own proxies. Reading it from
+ * the left let any client pick its address. Behind such a proxy,
+ * CF-Connecting-IP counts only when the proxy itself was reached by
+ * Cloudflare — someone reaching nginx directly cannot claim it.
+ *
+ * Not covered: a TCP-level forwarder that rewrites nothing (socat,
+ * docker's userland proxy on loopback) makes every client local, headers
+ * and all. Put an HTTP proxy in front, or let clients reach the port.
  */
 export function clientAddress(peer: string, headers: IncomingMessage["headers"]): string {
-  const cf = headers["cf-connecting-ip"];
+  const cf = literalIp(headers["cf-connecting-ip"]);
+  if (fromCloudflare(peer)) return cf ?? peer;
+  if (!fromLocalProxy(peer)) return peer;
+
   const xff = headers["x-forwarded-for"];
-  const local = fromLocalProxy(peer);
-  const edge = !local && CLOUDFLARE_RANGES.some((r) => inRange(peer, r));
-  if ((local || edge) && typeof cf === "string" && cf.trim()) return cf.trim();
-  if (local && typeof xff === "string" && xff.trim()) return xff.split(",")[0]!.trim();
-  return peer;
+  const hops = (Array.isArray(xff) ? xff.join(",") : xff ?? "").split(",");
+  let hop: string | null = null;
+  for (let i = hops.length - 1; i >= 0; i--) {
+    const h = literalIp(hops[i]);
+    if (!h) break; // not something a proxy wrote: trust nothing further left
+    if (!fromLocalProxy(h)) {
+      hop = h;
+      break;
+    }
+  }
+  if (hop) return fromCloudflare(hop) ? (cf ?? hop) : hop;
+  // No outside hop recorded: cloudflared without the header, or a client
+  // on this very network.
+  return cf ?? peer;
+}
+
+/**
+ * The operator's metrics token, if any. Too short to resist guessing
+ * means no metrics at all rather than weak ones.
+ */
+const MIN_METRICS_TOKEN = 24;
+function metricsTokenDigest(token: string | undefined): Buffer | null {
+  if (!token) return null;
+  if (token.length < MIN_METRICS_TOKEN) {
+    console.error(
+      `sandgate relay: SANDGATE_METRICS_TOKEN is shorter than ${MIN_METRICS_TOKEN} characters; /api/metrics stays off. ` +
+        "Generate one with: openssl rand -hex 32"
+    );
+    return null;
+  }
+  return createHash("sha256").update(token).digest();
 }
 
 /**
@@ -204,8 +253,18 @@ export async function startRelay(opts: {
   stateDir: string;
   /** Tests only: shorten the pairing-link lifetime. */
   claimTtlMs?: number;
-}): Promise<{ close: () => void; port: number; checkQuiet: (now?: number) => void }> {
+  /** Bearer token for /api/metrics; defaults to SANDGATE_METRICS_TOKEN. Unset: no metrics. */
+  metricsToken?: string;
+}): Promise<{ close: () => void; port: number; checkQuiet: (now?: number) => void; metricsEnabled: boolean }> {
   const claimTtl = opts.claimTtlMs ?? CLAIM_TTL_MS;
+  const metricsDigest = metricsTokenDigest(opts.metricsToken ?? process.env.SANDGATE_METRICS_TOKEN);
+  /** Constant time, and on digests so the token's length leaks nothing either. */
+  const metricsAuthorized = (req: IncomingMessage): boolean => {
+    if (!metricsDigest) return false;
+    const m = /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization ?? "");
+    if (!m) return false;
+    return timingSafeEqual(createHash("sha256").update(m[1]!).digest(), metricsDigest);
+  };
   mkdirSync(opts.stateDir, { recursive: true });
   const statePath = join(opts.stateDir, "relay-state.json");
 
@@ -476,7 +535,15 @@ export async function startRelay(opts: {
       }
 
       // --- API ---
-      if (req.method === "GET" && url.pathname === "/api/metrics") {
+      if (url.pathname === "/api/metrics") {
+        // Operator only. Public counters told an attacker whether their
+        // flood was being refused, and anyone how much the relay is used.
+        // Not allowed looks exactly like not there; a wrong token costs the
+        // caller against the per-address limit, so guessing goes nowhere.
+        if (req.method !== "GET" || !metricsAuthorized(req)) {
+          ipLimited(req);
+          return json(res, 404, { error: "Not found" });
+        }
         let activeRequests = 0;
         for (const p of pairings.values()) {
           for (const e of p.requests.values()) if (e.decisions.length < e.needed) activeRequests++;
@@ -504,7 +571,8 @@ export async function startRelay(opts: {
           `sandgate_relay_uptime_seconds ${Math.round(process.uptime())}`,
           "",
         ];
-        res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4" });
+        // no-store: a CDN in front must never hand these to the next caller.
+        res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4", "Cache-Control": "no-store" });
         return res.end(lines.join("\n"));
       }
       if (url.pathname.startsWith("/api/") && url.pathname !== "/api/health") {
@@ -524,18 +592,9 @@ export async function startRelay(opts: {
         }
       }
       if (req.method === "GET" && url.pathname === "/api/health") {
-        let activeRequests = 0;
-        for (const p of pairings.values()) {
-          for (const e of p.requests.values()) if (e.decisions.length < e.needed) activeRequests++;
-        }
-        return json(res, 200, {
-          ok: true,
-          // The phone compares it with each server's sandgate version.
-          version: VERSION,
-          uptime_sec: Math.round(process.uptime()),
-          pairings: Object.keys(state.subscriptions).length,
-          active_requests: activeRequests,
-        });
+        // Public, so nothing about use: counts live behind /api/metrics.
+        // The version stays — the phone compares it with each server's.
+        return json(res, 200, { ok: true, version: VERSION });
       }
       if (req.method === "GET" && url.pathname === "/api/vapid") {
         return json(res, 200, { publicKey: state.vapid.publicKey });
@@ -873,5 +932,5 @@ export async function startRelay(opts: {
   await new Promise<void>((resolve) => server.listen(opts.port, resolve));
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : opts.port;
-  return { close: () => server.close(), port, checkQuiet };
+  return { close: () => server.close(), port, checkQuiet, metricsEnabled: metricsDigest !== null };
 }

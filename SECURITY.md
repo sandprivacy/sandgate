@@ -93,12 +93,14 @@ Listed because you will find them anyway.
 1. **No external audit.** Written fast, tested hard (99 tests, including
    browser-level runs of the real page against a real relay and a
    simulated authenticator), reviewed by nobody but its author.
-2. **A leaked `pairId` lets someone hijack push delivery.** The relay is
-   blind by design, so it cannot tell your phone from an impostor when
-   registering a push subscription. The consequence is notification
-   theft and denial — never approval, since the attacker has no key.
-   `sandgate pair` again to recover. The relay's `/api/metrics` shows
-   push failures rising if this happens at scale.
+2. **A leaked `pairId` lets someone interfere with push delivery.** The
+   relay is blind by design, so it cannot tell your phone from an
+   impostor when registering a push subscription. An impostor receives
+   sealed blobs it cannot open, and by registering enough devices (eight
+   per pairing) can push yours out: denial — never approval, since the
+   attacker has no key. `sandgate pair` again to recover. The relay's
+   `/api/metrics` (operator token) shows push failures rising if this
+   happens at scale.
 2b. **The service worker keeps pairing secrets in the Cache API**, next to
    localStorage — same origin, same device, same sandbox. Nothing new
    is exposed, but it is one more place the secret lives on the phone.
