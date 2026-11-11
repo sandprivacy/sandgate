@@ -130,6 +130,47 @@ export interface DirectiveOptions {
    * enforced, "yes" still requires the key; it only lets the phone step run.
    */
   permitRoot?: boolean;
+  /**
+   * OpenSSH older than 8.7 (Ubuntu 20.04, Debian 11): keyboard-interactive
+   * through PAM is switched by ChallengeResponseAuthentication, and
+   * KbdInteractiveAuthentication alone does nothing. Those releases ship
+   * "ChallengeResponseAuthentication no", so without this line `sshd -t`
+   * passes, doctor said "All good", and every login failed — on a real
+   * Ubuntu 20.04 server.
+   */
+  legacyChallenge?: boolean;
+}
+
+/**
+ * Does this sshd still have the pre-8.7 ChallengeResponseAuthentication
+ * switch? `sshd -T` prints it only on those releases (8.7 made it an
+ * alias). Cannot tell: say yes — on a modern sshd the line is a harmless
+ * alias of KbdInteractiveAuthentication, on an old one it is required.
+ */
+export function legacyChallengeSwitch(settings: Map<string, string> | null): boolean {
+  return settings === null || settings.has("challengeresponseauthentication");
+}
+
+/**
+ * Is keyboard-interactive — the only way sshd runs the PAM stack after a
+ * key — actually enabled? A configuration that sshd -t accepts can still
+ * have it off, and then every login that must reach the hook fails.
+ */
+export function kbdIntProblems(settings: Map<string, string>): string[] {
+  const problems: string[] = [];
+  if ((settings.get("kbdinteractiveauthentication") ?? "yes").toLowerCase() === "no") {
+    problems.push(
+      "KbdInteractiveAuthentication is off: sshd never runs PAM after the key, so logins fail"
+    );
+  }
+  if ((settings.get("challengeresponseauthentication") ?? "yes").toLowerCase() === "no") {
+    problems.push(
+      "ChallengeResponseAuthentication is off: on OpenSSH older than 8.7 (Ubuntu 20.04, " +
+        "Debian 11) that disables keyboard-interactive through PAM, so every login fails. " +
+        "Rerun `sandgate ssh-guard install` to add ChallengeResponseAuthentication yes"
+    );
+  }
+  return problems;
 }
 
 /**
@@ -158,6 +199,7 @@ export function sshdDirectives(passwordLoginPossible: boolean, opts: DirectiveOp
     SSHD_MARKER,
     "UsePAM yes",
     "KbdInteractiveAuthentication yes",
+    ...(opts.legacyChallenge ? ["ChallengeResponseAuthentication yes"] : []),
     ...(keyOnly ? ["PasswordAuthentication no"] : []),
     ...(keyOnly && opts.permitRoot ? ["PermitRootLogin yes"] : []),
     `AuthenticationMethods ${methods}`,
@@ -192,6 +234,7 @@ export function keyFirstProblems(
   if ((settings.get("usepam") ?? "").toLowerCase() !== "yes") {
     problems.push(`${user}: UsePAM is off, so sshd never consults the hook`);
   }
+  problems.push(...kbdIntProblems(settings).map((p) => `${user}: ${p}`));
   const lists = methodLists(settings);
   const shown = settings.get("authenticationmethods") ?? "any";
   if (!lists.length || lists.some((list) => !list.includes("publickey"))) {
@@ -424,6 +467,40 @@ export function patchSshd(
   return { text: sshdDirectives(passwordLogin, opts) + "\n" + text, changed: true };
 }
 
+/** The lines of our managed block in a file's text (empty if none). */
+export function managedBlock(text: string, marker = SSHD_MARKER): string[] {
+  const lines = text.split("\n");
+  const at = lines.findIndex((line) => line.trim() === marker);
+  if (at < 0) return [];
+  const block: string[] = [];
+  for (const line of lines.slice(at + 1)) {
+    if (line.trim() === "") break;
+    block.push(line.trim());
+  }
+  return block;
+}
+
+function managedLine(pattern: RegExp): boolean {
+  for (const file of [DROPIN_FILE, SSHD_FILE]) {
+    try {
+      if (managedBlock(readFileSync(file, "utf8")).some((l) => pattern.test(l))) return true;
+    } catch {
+      /* absent */
+    }
+  }
+  return false;
+}
+
+/** Did a previous install of ours write "PermitRootLogin yes"? */
+export function managedPermitRoot(): boolean {
+  return managedLine(/^PermitRootLogin\s+yes$/i);
+}
+
+/** Did a previous install of ours turn passwords off (key-only)? */
+export function managedKeyOnly(): boolean {
+  return managedLine(/^PasswordAuthentication\s+no$/i);
+}
+
 /** sshd_config and its drop-ins, as [file, text] — for the Match scan. */
 export function sshdConfigTexts(): Array<[string, string]> {
   const texts: Array<[string, string]> = [];
@@ -610,13 +687,21 @@ export function installHook(opts: InstallOptions = {}): InstallReport {
   // Once key-only, always key-only until uninstall: our own drop-in turns
   // keyboard-interactive on, which would otherwise read as "passwords in
   // use" on a rerun and rebuild the password path — with the hook still
-  // placed first, a phone-only door.
-  const keyOnly = opts.keyOnly === true || !passwordOk || hookPlacedFirst(pamText);
+  // placed first, a phone-only door. Our sshd block counts too: an
+  // openssh-server upgrade can replace /etc/pam.d/sshd and take the hook
+  // with it, and the rerun that repairs it must stay key-only.
+  const keyOnly =
+    opts.keyOnly === true || !passwordOk || hookPlacedFirst(pamText) || managedKeyOnly();
 
   const admin = adminAccount();
   const rootSettings = effectiveSshdSettings(matchSpec("root")) ?? settings;
   const rootKey = userHasKey("root", rootSettings) !== false;
-  const rootRefused = rootKey && rootPamRefused(rootSettings?.get("permitrootlogin"));
+  // sshd -T shows our OWN "PermitRootLogin yes" on a rerun, which reads as
+  // "root is fine" — drop the line on that basis and root is locked out
+  // again. What counts is whether the line is ours.
+  const rootRefused =
+    rootKey &&
+    (rootPamRefused(rootSettings?.get("permitrootlogin")) || managedPermitRoot());
 
   if (keyOnly) {
     const adminSettings = admin === "root" ? rootSettings : effectiveSshdSettings(matchSpec(admin));
@@ -659,7 +744,14 @@ export function installHook(opts: InstallOptions = {}): InstallReport {
   }
 
   const permitRoot = keyOnly && rootRefused;
-  const directives = sshdDirectives(passwordOk, { keyOnly, permitRoot });
+  const legacyChallenge = legacyChallengeSwitch(settings);
+  const directives = sshdDirectives(passwordOk, { keyOnly, permitRoot, legacyChallenge });
+  if (legacyChallenge && settings) {
+    report.steps.push(
+      "OpenSSH older than 8.7: adding ChallengeResponseAuthentication yes, which is what " +
+        "turns keyboard-interactive through PAM on here"
+    );
+  }
   if (permitRoot) {
     report.steps.push(
       "PermitRootLogin yes in the drop-in: root still needs its key, this only lets the phone step run"
@@ -723,7 +815,7 @@ export function installHook(opts: InstallOptions = {}): InstallReport {
         );
       }
     } else {
-      const sshd = patchSshd(sshdText, passwordOk, { keyOnly, permitRoot });
+      const sshd = patchSshd(sshdText, passwordOk, { keyOnly, permitRoot, legacyChallenge });
       if (sshd.changed) {
         write(SSHD_FILE, sshd.text);
         report.steps.push(`key logins forced through PAM in ${SSHD_FILE}`);
@@ -740,6 +832,19 @@ export function installHook(opts: InstallOptions = {}): InstallReport {
     return report;
   }
   report.steps.push("sshd -t accepted the configuration");
+
+  // Both modes: sshd -t accepting the file says nothing about whether
+  // keyboard-interactive is on — and without it every login that must
+  // reach the hook fails. Ask sshd what it resolved.
+  const resolvedGlobal = effectiveSshdSettings();
+  const kbdProblems = resolvedGlobal ? kbdIntProblems(resolvedGlobal) : [];
+  if (kbdProblems.length) {
+    rollback();
+    report.error =
+      "logins would fail: keyboard-interactive is not enabled. Everything was reverted:\n" +
+      kbdProblems.map((p) => `  - ${p}`).join("\n");
+    return report;
+  }
 
   // Key-only: prove, from sshd's own resolution with Match blocks applied,
   // that no account we know of can reach the hook without a key.
@@ -823,6 +928,12 @@ export function analyzeWiring(input: {
       label: "UsePAM",
       detail: "UsePAM is off: sshd never runs the hook — set UsePAM yes",
     });
+  }
+  // sshd -t happily accepts a configuration where this is off; the
+  // result is that every login fails. Checked in both modes.
+  const kbd = global ? kbdIntProblems(global) : [];
+  if (kbd.length) {
+    findings.push({ level: "fail", label: "keyboard-interactive", detail: kbd.join("\n    ") });
   }
 
   if (first) {

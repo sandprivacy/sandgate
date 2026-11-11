@@ -47,7 +47,7 @@ sudo sandgate ssh-guard setup eyJyZWxheVVybCI6...   # the exact line `pair` prin
 Rather not put Node on a server? Each release ships a standalone binary:
 
 ```bash
-V=v0.9.0   # pin the version you mean to run
+V=v0.9.1   # pin the version you mean to run
 cd /usr/local/bin
 curl -fL --progress-bar -o sandgate.new https://github.com/sandprivacy/sandgate/releases/download/$V/sandgate-linux-x64
 curl -fsSL https://github.com/sandprivacy/sandgate/releases/download/$V/sandgate-linux-x64.sha256 \
@@ -196,12 +196,24 @@ This is the real risk — the cryptography is the easy part.
 
 ## Other distributions
 
-Tested on Ubuntu 24.04. The installer adapts to what it finds, but two
+Tested against a real sshd on Ubuntu 24.04 (OpenSSH 9.6) and Ubuntu
+20.04 (OpenSSH 8.2). The installer adapts to what it finds, but two
 families deserve a warning rather than a promise:
 
 **Debian/Ubuntu** — the tested path. `sshd_config.d` exists and is
 included from the top of `sshd_config`, so the directives go in a
 drop-in read before everything else.
+
+**OpenSSH older than 8.7** (Ubuntu 20.04, Debian 11) — there,
+keyboard-interactive through PAM is switched on by
+`ChallengeResponseAuthentication`, not `KbdInteractiveAuthentication`,
+and these distributions ship it `no`. v0.9.0 did not know that: `sshd -t`
+passed, `doctor` said all good, and every login failed. Since v0.9.1 the
+installer adds `ChallengeResponseAuthentication yes` when sshd still has
+that switch, refuses to keep any configuration in which
+keyboard-interactive ends up off, and `doctor` reports it. A server
+installed with v0.9.0 is repaired by upgrading the binary and running
+`sudo sandgate ssh-guard install` again.
 
 **RHEL / Rocky / Alma 9** — same layout, so the drop-in path applies.
 Node comes from `dnf` or NodeSource rather than `apt` — or use the

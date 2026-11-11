@@ -18,6 +18,9 @@ import {
   adminAccount,
   matchSpec,
   analyzeWiring,
+  kbdIntProblems,
+  legacyChallengeSwitch,
+  managedBlock,
   PAM_MARKER,
   SSHD_MARKER,
   PAM_FIRST_CONTROL,
@@ -316,4 +319,81 @@ test("doctor: UsePAM off is a failure", () => {
   const settings = strict({ usepam: "no" });
   const findings = analyzeWiring({ pamText, global: settings, accounts: [] });
   assert.ok(findings.some((f) => f.level === "fail" && f.label === "UsePAM"));
+});
+
+// ---- OpenSSH older than 8.7 (Ubuntu 20.04, Debian 11) --------------------
+// There, ChallengeResponseAuthentication is the switch that turns
+// keyboard-interactive through PAM on; distributions ship it "no". On a
+// real Ubuntu 20.04 server, sshd -t passed, doctor said "All good", and
+// every login failed.
+
+/** `sshd -T` on Ubuntu 20.04 after a v0.9.0 install: kbd on, challenge off. */
+const focal = (extra: Record<string, string> = {}) =>
+  strict({ challengeresponseauthentication: "no", ...extra });
+
+test("an old sshd is recognised by the switch sshd -T still prints", () => {
+  assert.equal(legacyChallengeSwitch(focal()), true);
+  assert.equal(legacyChallengeSwitch(strict()), false, "8.7+ no longer prints it");
+  assert.equal(legacyChallengeSwitch(null), true, "unknown: add the harmless alias");
+});
+
+test("the drop-in turns ChallengeResponseAuthentication on for an old sshd only", () => {
+  assert.match(
+    sshdDirectives(true, { legacyChallenge: true }),
+    /^ChallengeResponseAuthentication yes$/m
+  );
+  assert.match(
+    sshdDirectives(false, { keyOnly: true, legacyChallenge: true }),
+    /^ChallengeResponseAuthentication yes$/m
+  );
+  assert.ok(!/ChallengeResponse/.test(sshdDirectives(true)));
+  // Our line must sit in the drop-in that is read FIRST: sshd keeps the
+  // first value, and the distribution's "no" comes later in sshd_config.
+  const d = sshdDirectives(true, { legacyChallenge: true });
+  assert.ok(d.indexOf("ChallengeResponseAuthentication yes") < d.indexOf("AuthenticationMethods"));
+});
+
+test("keyboard-interactive switched off is caught, whichever switch did it", () => {
+  assert.deepEqual(kbdIntProblems(strict()), []);
+  assert.ok(kbdIntProblems(focal()).some((p) => /older than 8\.7/.test(p)));
+  assert.ok(kbdIntProblems(strict({ kbdinteractiveauthentication: "no" })).length > 0);
+  assert.deepEqual(kbdIntProblems(focal({ challengeresponseauthentication: "yes" })), []);
+});
+
+test("doctor: the Ubuntu 20.04 case is no longer 'All good' (password mode)", () => {
+  const pamText = patchPam(UBUNTU_PAM, CMD).text;
+  const findings = analyzeWiring({
+    pamText,
+    global: focal({ authenticationmethods: "publickey,keyboard-interactive:pam keyboard-interactive:pam" }),
+    accounts: [],
+  });
+  const fail = findings.find((f) => f.label === "keyboard-interactive");
+  assert.ok(fail && fail.level === "fail", JSON.stringify(findings));
+  assert.match(fail!.detail!, /ChallengeResponseAuthentication/);
+});
+
+test("doctor and install: the Ubuntu 20.04 case fails key-only verification too", () => {
+  const pamText = patchPamKeyOnly(UBUNTU_PAM, CMD).text;
+  const findings = analyzeWiring({
+    pamText,
+    global: focal(),
+    accounts: [{ user: "root", settings: focal(), usesKey: true }],
+  });
+  assert.ok(findings.some((f) => f.level === "fail"));
+  assert.ok(keyFirstProblems("root", focal()).some((p) => /ChallengeResponseAuthentication/.test(p)));
+});
+
+test("our own managed block is read back, and only it", () => {
+  // On a rerun, sshd -T reports OUR "PermitRootLogin yes" as if root were
+  // fine — dropping it on that basis locked root out again (seen on
+  // Ubuntu 20.04). The installer reads its own block instead.
+  const dropin = sshdDirectives(false, { keyOnly: true, permitRoot: true, legacyChallenge: true });
+  const block = managedBlock(dropin);
+  assert.ok(block.includes("PermitRootLogin yes"));
+  assert.ok(block.includes("PasswordAuthentication no"));
+  assert.ok(!block.includes(SSHD_MARKER), "the marker itself is not a directive");
+
+  const mixed = "Port 22\nPermitRootLogin yes\n\n" + dropin + "\nPermitRootLogin no\n";
+  assert.deepEqual(managedBlock(mixed), block, "lines outside the block are not ours");
+  assert.deepEqual(managedBlock("Port 22\nPermitRootLogin yes\n"), []);
 });

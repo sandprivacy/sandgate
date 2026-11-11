@@ -7,4 +7,4 @@
  * `./sandgate.new --version && mv sandgate.new sandgate` only swaps in a
  * binary that actually runs.
  */
-export const VERSION = "0.9.0";
+export const VERSION = "0.9.1";
