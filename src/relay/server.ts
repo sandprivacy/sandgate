@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import webpush from "web-push";
 import { PWA_HTML, PWA_SW, pwaManifest } from "./pwa-page.js";
 import { ICON_SVG, iconPng } from "./icons.js";
+import { VERSION } from "../version.js";
 
 /**
  * The sandgate relay: bridges a gateway (on a computer) and the paired
@@ -47,6 +48,21 @@ interface Pairing {
   claim?: { payload: unknown; ts: number };
   /** When a phone collected the claim — the pairing is spoken for. */
   claimedAt?: number;
+  /** The server's last heartbeat, sealed. */
+  status?: StoredStatus;
+}
+
+/**
+ * What the relay keeps of a heartbeat: the sealed blob it cannot read,
+ * and the one thing it can see — when it arrived. That is enough to tell
+ * the phone "this pairing went quiet" without knowing what it is.
+ */
+interface StoredStatus {
+  payload: unknown;
+  receivedAt: number;
+  intervalSec: number;
+  /** The phone was told this server went quiet; tell it when it is back. */
+  offlineAlerted?: boolean;
 }
 
 const MAX_BODY = 64 * 1024;
@@ -77,6 +93,15 @@ const MAX_SUBSCRIPTIONS = 8;
  * request that died long ago. Gateways send the request's own timeout.
  */
 const PUSH_TTL_DEFAULT_SEC = 600;
+/** Heartbeats closer together than this are refused. */
+const MIN_STATUS_GAP_MS = 20 * 1000;
+/** Statuses kept at most: invented pair ids must not fill the disk. */
+const MAX_STATUSES = 5000;
+/** A server is "quiet" after missing this many heartbeats in a row… */
+const MISSED_BEATS = 3;
+/** …and never sooner than this, whatever interval it announces. */
+const MIN_QUIET_MS = 10 * 60 * 1000;
+export const quietAfterMs = (intervalSec: number) => Math.max(MIN_QUIET_MS, MISSED_BEATS * intervalSec * 1000 + 60_000);
 
 /**
  * Per-address limit, on top of the per-pairing one: the pairing limit
@@ -105,7 +130,7 @@ export async function startRelay(opts: {
   stateDir: string;
   /** Tests only: shorten the pairing-link lifetime. */
   claimTtlMs?: number;
-}): Promise<{ close: () => void; port: number }> {
+}): Promise<{ close: () => void; port: number; checkQuiet: (now?: number) => void }> {
   const claimTtl = opts.claimTtlMs ?? CLAIM_TTL_MS;
   mkdirSync(opts.stateDir, { recursive: true });
   const statePath = join(opts.stateDir, "relay-state.json");
@@ -114,13 +139,16 @@ export async function startRelay(opts: {
     vapid: { publicKey: string; privateKey: string };
     /** One device per pairing in older state files, a list since. */
     subscriptions: Record<string, webpush.PushSubscription | webpush.PushSubscription[]>;
+    /** Last heartbeat per pairing — kept so a restart does not forget who went quiet. */
+    statuses?: Record<string, StoredStatus>;
   };
   if (existsSync(statePath)) {
     state = JSON.parse(readFileSync(statePath, "utf8"));
     state.subscriptions ??= {};
+    state.statuses ??= {};
   } else {
     const keys = webpush.generateVAPIDKeys();
-    state = { vapid: keys, subscriptions: {} };
+    state = { vapid: keys, subscriptions: {}, statuses: {} };
     writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 });
   }
   const persist = () => writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 });
@@ -179,10 +207,59 @@ export async function startRelay(opts: {
         requests: new Map(),
         listeners: new Set(),
         recent: [],
+        status: state.statuses?.[pairId],
       };
       pairings.set(pairId, p);
     }
     return p;
+  };
+
+  /** Push to every device of a pairing. */
+  const pushAll = (pairId: string, message: string, ttl: number) => {
+    const pairing = getPairing(pairId);
+    for (const sub of [...pairing.subscriptions]) {
+      webpush
+        // urgency high: someone is waiting on the other end. At the
+        // default "normal", Apple delivers at low priority and an
+        // iPhone saving battery holds it back or drops it.
+        .sendNotification(sub, message, { TTL: ttl, urgency: "high" })
+        .then(() => {
+          metrics.pushSent++;
+        })
+        .catch((err: any) => {
+          metrics.pushFailed++;
+          // 404/410: the push service forgot this device (app removed,
+          // notifications switched off). Stop sending into the void.
+          if (err?.statusCode === 404 || err?.statusCode === 410) {
+            pairing.subscriptions = pairing.subscriptions.filter((s) => s.endpoint !== sub.endpoint);
+            if (pairing.subscriptions.length) state.subscriptions[pairId] = pairing.subscriptions;
+            else delete state.subscriptions[pairId];
+            persist();
+          }
+          // Phone offline is normal (the PWA polls anyway), but ops must
+          // be able to SEE a push service rejecting us.
+          console.error(
+            `[push] delivery failed (HTTP ${err?.statusCode ?? "?"}): ${String(err?.body ?? err).slice(0, 200)}`
+          );
+        });
+    }
+  };
+
+  /**
+   * Servers that went quiet: tell their phones once, and again when they
+   * come back. Checked against the relay's own clock — the one thing
+   * about a heartbeat it can see.
+   */
+  const checkQuiet = (now = Date.now()) => {
+    let changed = false;
+    for (const [pairId, st] of Object.entries(state.statuses ?? {})) {
+      if (st.offlineAlerted || now - st.receivedAt < quietAfterMs(st.intervalSec)) continue;
+      st.offlineAlerted = true;
+      changed = true;
+      pushAll(pairId, JSON.stringify({ type: "server", pairId, state: "offline", since: st.receivedAt }), 3600);
+      notifyListeners(getPairing(pairId), "status");
+    }
+    if (changed) persist();
   };
 
   const notifyListeners = (pairing: Pairing, event: string) => {
@@ -205,10 +282,11 @@ export async function startRelay(opts: {
     const idleCutoff = Date.now() - 60 * 60 * 1000;
     for (const [id, p] of pairings) {
       const empty =
-        !p.subscriptions.length && !p.claim && p.requests.size === 0 && p.listeners.size === 0;
+        !p.subscriptions.length && !p.status && !p.claim && p.requests.size === 0 && p.listeners.size === 0;
       const idle = !p.lastSeen || p.lastSeen < idleCutoff;
       if (empty && idle && !(p.claimedAt && p.claimedAt > idleCutoff)) pairings.delete(id);
     }
+    checkQuiet();
     const ipCutoff = Date.now() - IP_WINDOW_MS;
     for (const [ip, hits] of ipHits) {
       const live = hits.filter((t) => t > ipCutoff);
@@ -350,6 +428,8 @@ export async function startRelay(opts: {
         }
         return json(res, 200, {
           ok: true,
+          // The phone compares it with each server's sandgate version.
+          version: VERSION,
           uptime_sec: Math.round(process.uptime()),
           pairings: Object.keys(state.subscriptions).length,
           active_requests: activeRequests,
@@ -473,34 +553,57 @@ export async function startRelay(opts: {
           payload: body.payload,
         });
         const ttl = Math.min(3600, Math.max(30, parseInt(String(body.ttlSec ?? PUSH_TTL_DEFAULT_SEC), 10) || PUSH_TTL_DEFAULT_SEC));
-        for (const sub of [...pairing.subscriptions]) {
-          webpush
-            // urgency high: someone is waiting on the other end. At the
-            // default "normal", Apple delivers at low priority and an
-            // iPhone saving battery holds it back or drops it.
-            .sendNotification(sub, message, { TTL: ttl, urgency: "high" })
-            .then(() => {
-              metrics.pushSent++;
-            })
-            .catch((err: any) => {
-              metrics.pushFailed++;
-              // 404/410: the push service forgot this device (app removed,
-              // notifications switched off). Stop sending into the void.
-              if (err?.statusCode === 404 || err?.statusCode === 410) {
-                pairing.subscriptions = pairing.subscriptions.filter((s) => s.endpoint !== sub.endpoint);
-                if (pairing.subscriptions.length) state.subscriptions[body.pairId] = pairing.subscriptions;
-                else delete state.subscriptions[body.pairId];
-                persist();
-              }
-              // Phone offline is normal (the PWA polls anyway), but ops must
-              // be able to SEE a push service rejecting us.
-              console.error(
-                `[push] delivery failed (HTTP ${err?.statusCode ?? "?"}): ${String(err?.body ?? err).slice(0, 200)}`
-              );
-            });
-        }
+        pushAll(body.pairId, message, ttl);
         notifyListeners(pairing, "request");
         return json(res, 200, { ok: true });
+      }
+
+      // --- server heartbeats (sealed; the relay keeps the latest only) ---
+      if (url.pathname === "/api/status" && (req.method === "POST" || req.method === "DELETE")) {
+        const body = await readBody(req);
+        if (!validId(body.pairId)) return json(res, 400, { error: "pairId required" });
+        const pairing = getPairing(body.pairId);
+        const statuses = (state.statuses ??= {});
+        if (req.method === "DELETE") {
+          // An uninstall, on purpose: not a server that died.
+          pairing.status = undefined;
+          delete statuses[body.pairId];
+          persist();
+          notifyListeners(pairing, "status");
+          return json(res, 200, { ok: true });
+        }
+        if (!body.payload || typeof body.payload !== "object") {
+          return json(res, 400, { error: "payload required" });
+        }
+        const now = Date.now();
+        const prev = pairing.status;
+        // A server back from silence is always welcome, gap or not.
+        if (prev && !prev.offlineAlerted && now - prev.receivedAt < MIN_STATUS_GAP_MS) {
+          return json(res, 429, { error: "Heartbeat too frequent." });
+        }
+        if (!prev && Object.keys(statuses).length >= MAX_STATUSES) {
+          return json(res, 503, { error: "Relay is not accepting new servers right now." });
+        }
+        const intervalSec = Math.min(3600, Math.max(60, parseInt(String(body.intervalSec ?? 300), 10) || 300));
+        pairing.status = { payload: body.payload, receivedAt: now, intervalSec };
+        statuses[body.pairId] = pairing.status;
+        persist();
+        if (prev?.offlineAlerted) {
+          pushAll(body.pairId, JSON.stringify({ type: "server", pairId: body.pairId, state: "online", since: prev.receivedAt }), 3600);
+        }
+        notifyListeners(pairing, "status");
+        return json(res, 200, { ok: true });
+      }
+      if (req.method === "GET" && url.pathname === "/api/status") {
+        const pairId = url.searchParams.get("pairId") ?? "";
+        if (!validId(pairId)) return json(res, 400, { error: "bad pairId" });
+        const st = getPairing(pairId).status;
+        if (!st) return json(res, 200, { status: null });
+        return json(res, 200, {
+          status: { payload: st.payload, receivedAt: st.receivedAt, intervalSec: st.intervalSec },
+          now: Date.now(),
+          quietAfterMs: quietAfterMs(st.intervalSec),
+        });
       }
 
       // SSE stream for open PWA pages: instant updates instead of polling.
@@ -607,5 +710,5 @@ export async function startRelay(opts: {
   await new Promise<void>((resolve) => server.listen(opts.port, resolve));
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : opts.port;
-  return { close: () => server.close(), port };
+  return { close: () => server.close(), port, checkQuiet };
 }

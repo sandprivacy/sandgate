@@ -155,12 +155,34 @@ async function describePush(data, store) {
   return out;
 }
 
+// A server that went quiet, or came back. The relay knows only the pair
+// id; the name comes from this device's own list.
+function describeServerPush(data, store) {
+  var pair = null;
+  for (var i = 0; i < store.pairs.length; i++) if (store.pairs[i].pairId === data.pairId) pair = store.pairs[i];
+  var name = pair && pair.name ? pair.name : "A server";
+  var d = new Date(data.since || Date.now());
+  var hm = ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+  var back = data.state === "online";
+  return {
+    title: back ? name + " is back" : name + " stopped responding",
+    options: {
+      body: back ? "Heartbeat received again." : "No heartbeat since " + hm + ". Down, or cut off from the relay.",
+      tag: "sandgate-server-" + data.pairId,
+      renotify: true,
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
+      data: {},
+    },
+  };
+}
+
 self.addEventListener("push", function (e) {
   e.waitUntil((async function () {
     var data = null;
     try { data = e.data ? e.data.json() : null; } catch (err) {}
     var store = await loadStore();
-    var desc = await describePush(data, store);
+    var desc = data && data.type === "server" ? describeServerPush(data, store) : await describePush(data, store);
     await self.registration.showNotification(desc.title, desc.options);
     await refreshPages();
   })());
@@ -360,6 +382,20 @@ export const PWA_HTML = `<!doctype html>
   .d.answered { color: #7fbf9a; }
   .d.denied { color: #d98a76; }
   .d.expired { color: var(--soft); }
+
+  .srv { padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .srv .top { display: flex; gap: 8px; align-items: center; }
+  .srv .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--soft); flex: none; }
+  .srv .dot.up { background: #7fbf9a; }
+  .srv .dot.down { background: var(--no); }
+  .srv .name { flex: 1; color: var(--ink); font-weight: 650; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srv .seen { color: var(--soft); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .srv .seen.down { color: #d98a76; font-weight: 650; }
+  .srv .meta { color: var(--soft); margin-top: 3px; overflow-wrap: anywhere; }
+  .srv .flag { margin-top: 6px; padding: 7px 9px; border-radius: 8px; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .srv .flag.fail { background: rgba(217,138,118,.12); color: #e8a28f; }
+  .srv .flag.warn { background: rgba(217,164,65,.12); color: var(--accent); }
+  .srv .flag b { font-weight: 650; }
 
   .answer-input {
     width: 100%; box-sizing: border-box; padding: 12px 14px; margin: 0 0 12px;
@@ -923,6 +959,7 @@ export const PWA_HTML = `<!doctype html>
       var es = new EventSource("/api/events?pairId=" + encodeURIComponent(p.pairId));
       es.addEventListener("request", fetchPending);
       es.addEventListener("decision", fetchPending);
+      es.addEventListener("status", function () { fetchStatuses(); });
       es.onopen = function () {
         sseOn = true;
         if (!pushOn) setStatus("live");
@@ -1327,6 +1364,142 @@ export const PWA_HTML = `<!doctype html>
     vaultsEl.appendChild(section);
   }
   renderVaults();
+
+  // --- servers: sealed heartbeats from ssh-guard ---------------------------
+  // Each server sends its status every few minutes, sealed with its own
+  // pairing key; the relay hands back the latest blob and when it came.
+  var serversEl = document.createElement("div");
+  histEl.parentElement.insertBefore(serversEl, histEl);
+  var statuses = {}; // pairId -> { st, ageAt, fetchedAt, quietAfterMs }
+  var latestVersion = null;
+
+  function versionLess(a, b) {
+    var x = String(a || "").split("."), y = String(b || "").split(".");
+    for (var i = 0; i < 3; i++) {
+      var m = parseInt(x[i], 10) || 0, n = parseInt(y[i], 10) || 0;
+      if (m !== n) return m < n;
+    }
+    return false;
+  }
+  function ago(ms) {
+    var s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.round(s / 60) + " min ago";
+    if (s < 86400) return Math.round(s / 3600) + " h ago";
+    return Math.round(s / 86400) + " d ago";
+  }
+  function bytesPct(used, total) { return total ? Math.round((used / total) * 100) + "%" : "?"; }
+  function upFor(sec) {
+    if (sec < 3600) return Math.round(sec / 60) + " min";
+    if (sec < 86400) return Math.round(sec / 3600) + " h";
+    return Math.round(sec / 86400) + " d";
+  }
+
+  var statusBusy = false;
+  async function fetchStatuses() {
+    if (statusBusy) return;
+    statusBusy = true;
+    try {
+      if (!latestVersion) {
+        try { latestVersion = (await (await fetch("/api/health")).json()).version || null; } catch (e) {}
+      }
+      await Promise.all(pairs.map(async function (p) {
+        var data;
+        try {
+          var res = await fetch("/api/status?pairId=" + encodeURIComponent(p.pairId));
+          if (!res.ok) return; // keep what we had: a failed read is not news
+          data = await res.json();
+        } catch (e) { return; }
+        if (!data || !data.status) { delete statuses[p.pairId]; return; }
+        try {
+          var st = await openSealed(p, data.status.payload, "status:" + p.pairId);
+          if (!st || st.v !== 1) return;
+          // Age by the relay's clock (the phone's may be off), unless the
+          // sealed timestamp says the blob is older than the relay claims:
+          // an old heartbeat replayed must not pass for a live server.
+          var age = Math.max(0, (data.now || 0) - data.status.receivedAt);
+          var sealedAge = Date.now() - st.ts;
+          if (st.ts < data.status.receivedAt - 10 * 60 * 1000) age = Math.max(age, sealedAge);
+          statuses[p.pairId] = { st: st, age: age, fetchedAt: Date.now(), quietAfterMs: data.quietAfterMs || 15 * 60 * 1000 };
+        } catch (e) { /* not sealed with this vault's key: ignore it */ }
+      }));
+    } finally {
+      statusBusy = false;
+      renderServers();
+    }
+  }
+
+  function renderServers() {
+    serversEl.textContent = "";
+    var ids = pairs.filter(function (p) { return statuses[p.pairId]; });
+    if (!ids.length) return;
+    var section = document.createElement("div");
+    section.className = "hist";
+    var h = document.createElement("h3");
+    h.textContent = "Servers";
+    section.appendChild(h);
+    ids.forEach(function (p) {
+      var entry = statuses[p.pairId], st = entry.st;
+      var age = entry.age + (Date.now() - entry.fetchedAt);
+      var down = age > entry.quietAfterMs;
+      var row = document.createElement("div"); row.className = "srv";
+
+      var top = document.createElement("div"); top.className = "top";
+      var dot = document.createElement("span"); dot.className = "dot " + (down ? "down" : "up");
+      var name = document.createElement("span"); name.className = "name"; name.textContent = p.name;
+      var seen = document.createElement("span"); seen.className = "seen" + (down ? " down" : "");
+      seen.textContent = down ? "silent · " + ago(age) : "online · " + ago(age);
+      top.appendChild(dot); top.appendChild(name); top.appendChild(seen);
+      row.appendChild(top);
+
+      var meta1 = document.createElement("div"); meta1.className = "meta";
+      meta1.textContent = [
+        (st.ips || []).join(", "),
+        st.os,
+        st.openssh ? "OpenSSH " + st.openssh : null,
+      ].filter(Boolean).join(" · ");
+      row.appendChild(meta1);
+
+      var meta2 = document.createElement("div"); meta2.className = "meta";
+      var used = st.disk ? st.disk.total - st.disk.free : 0;
+      meta2.textContent = [
+        "sandgate " + st.sandgate,
+        st.mode === "notify" ? "notify only" : "blocking",
+        st.keyOnly ? "key + phone" : "password + phone",
+        "load " + (st.load && st.load.length ? st.load[0] : "?") + (st.cpus ? "/" + st.cpus : ""),
+        st.mem ? "mem " + bytesPct(st.mem.total - st.mem.free, st.mem.total) : null,
+        st.disk ? "disk " + bytesPct(used, st.disk.total) : null,
+        "up " + upFor(st.uptimeSec || 0),
+      ].filter(Boolean).join(" · ");
+      row.appendChild(meta2);
+
+      function flag(level, label, detail) {
+        var f = document.createElement("div"); f.className = "flag " + level;
+        var b = document.createElement("b"); b.textContent = label;
+        f.appendChild(b);
+        if (detail) f.appendChild(document.createTextNode(" — " + detail));
+        row.appendChild(f);
+      }
+      if (latestVersion && versionLess(st.sandgate, latestVersion)) {
+        flag("warn", "update available", st.sandgate + " → " + latestVersion + " (replace the binary with mv, see the docs)");
+      }
+      if (!st.doctor) {
+        flag("warn", "doctor not run", "the heartbeat could not read sshd's configuration");
+      } else {
+        (st.doctor.findings || []).forEach(function (f) { flag(f.level === "fail" ? "fail" : "warn", f.label, f.detail); });
+      }
+      if (!st.hatch) flag("warn", "no escape hatch", "no exempt user and not in notify mode: a flat phone means no SSH");
+      if (st.disk && st.disk.total && st.disk.free / st.disk.total < 0.1) flag("warn", "disk almost full", bytesPct(used, st.disk.total) + " used");
+
+      section.appendChild(row);
+    });
+    serversEl.appendChild(section);
+  }
+
+  fetchStatuses();
+  setInterval(function () { if (!document.hidden) fetchStatuses(); }, 60000);
+  setInterval(function () { if (!document.hidden) renderServers(); }, 30000);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) fetchStatuses(); });
 
   fetchPending();
 })();

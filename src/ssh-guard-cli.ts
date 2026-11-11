@@ -49,6 +49,8 @@ export async function runSshGuard(
       return uninstall();
     case "doctor":
       return doctor(configPath);
+    case "heartbeat":
+      return heartbeat(configPath);
     default:
       console.error(
         [
@@ -61,6 +63,8 @@ export async function runSshGuard(
           "  test             send a fake login to your phone",
           "  enforce --yes    switch from notifying to actually blocking",
           "  doctor           check the wiring and your escape hatch",
+          "  heartbeat        send this server's status to your phone now",
+          "                   (install sets up a timer that does it every 5 min)",
           "  uninstall        remove everything it added",
           "  approve          called by PAM, not by you",
         ].join("\n")
@@ -105,6 +109,49 @@ async function keyOnlyConfirmed(confirmed: boolean): Promise<boolean> {
 async function binaryInvocation(): Promise<string> {
   const { hookCommand } = await import("./ssh-guard-install.js");
   return hookCommand().display;
+}
+
+/** After a successful install: the timer that keeps the phone informed. */
+async function setUpHeartbeat(configPath: string): Promise<void> {
+  try {
+    const { hookCommand } = await import("./ssh-guard-install.js");
+    const { installHeartbeat } = await import("./ssh-guard-heartbeat.js");
+    const { DEFAULT_CONFIG_PATH } = await import("./ssh-guard.js");
+    const argv = hookCommand().argv.slice(0, -2); // drop "ssh-guard approve"
+    console.log(`  ${installHeartbeat(argv, configPath, DEFAULT_CONFIG_PATH)}`);
+  } catch (err) {
+    console.log(`  heartbeat: WARNING, not set up (${err instanceof Error ? err.message : err})`);
+  }
+}
+
+/** One heartbeat, now. Run by the timer; useful by hand to check. */
+async function heartbeat(configPath: string): Promise<void> {
+  const config = loadGuardConfig(configPath);
+  const { gatherFindings, hookPlacedFirst, PAM_FILE } = await import("./ssh-guard-install.js");
+  const { collectStatus, sendHeartbeat } = await import("./ssh-guard-heartbeat.js");
+  let findings = null;
+  let keyOnly = false;
+  try {
+    findings = gatherFindings();
+    keyOnly = existsSync(PAM_FILE) && hookPlacedFirst(readFileSync(PAM_FILE, "utf8"));
+  } catch {
+    // Not root, or sshd unreadable: send what we know, the phone says "unknown".
+  }
+  const status = collectStatus(config, findings, keyOnly);
+  try {
+    if ((await sendHeartbeat(config, status)) === "skipped") {
+      console.log("Skipped: the relay heard from this server less than 20 seconds ago.");
+      return;
+    }
+  } catch (err) {
+    console.error(`sandgate heartbeat: ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
+  }
+  const problems = status.doctor?.findings.filter((f) => f.level === "fail").length ?? 0;
+  console.log(
+    `Sent: ${status.name ?? status.host} · sandgate ${status.sandgate} · ` +
+      (status.doctor ? (problems ? `${problems} problem(s) shown on your phone` : "doctor ok") : "doctor not run (not root?)")
+  );
 }
 
 /**
@@ -284,6 +331,7 @@ async function setup(
     console.error("\n" + report.error);
     process.exit(1);
   }
+  await setUpHeartbeat(configPath);
   console.log(
     [
       "",
@@ -340,6 +388,7 @@ async function install(
 ${report.error}`);
     process.exit(1);
   }
+  await setUpHeartbeat(configPath);
 
   const notifying = config.failOpen === true;
   console.log(
@@ -401,6 +450,17 @@ async function uninstall(): Promise<void> {
     process.exit(1);
   }
   const report = uninstallHook();
+  // The heartbeat goes too, and the relay is told it stopped on purpose:
+  // otherwise the phone would report this server as down in 15 minutes.
+  try {
+    const { uninstallHeartbeat, sendGoodbye } = await import("./ssh-guard-heartbeat.js");
+    const removed = uninstallHeartbeat();
+    if (removed) report.steps.push(removed);
+    const config = loadGuardConfig(configPathFromEnv());
+    await sendGoodbye(config).catch(() => {});
+  } catch {
+    /* no config, no timer: nothing to say goodbye with */
+  }
   for (const step of report.steps) console.log(`  ${step}`);
   if (report.backups.length) console.log(`  backups: ${report.backups.join(", ")}`);
   if (report.error) {
@@ -445,18 +505,9 @@ async function doctor(configPath: string): Promise<void> {
   // Ask sshd what it actually resolved to — globally, and for root and
   // you with Match blocks applied: reading sshd_config alone misses
   // drop-in files, and reported a correct install as broken.
-  const { effectiveSshdSettings, analyzeWiring, adminAccount, matchSpec, userHasKey, PAM_FILE } =
-    await import("./ssh-guard-install.js");
-  if (existsSync(PAM_FILE)) {
-    const accounts = [...new Set(["root", adminAccount()])].map((user) => {
-      const settings = effectiveSshdSettings(matchSpec(user));
-      return { user, settings, usesKey: userHasKey(user, settings) !== false };
-    });
-    const findings = analyzeWiring({
-      pamText: readFileSync(PAM_FILE, "utf8"),
-      global: effectiveSshdSettings(),
-      accounts,
-    });
+  const { gatherFindings } = await import("./ssh-guard-install.js");
+  const findings = gatherFindings();
+  if (findings) {
     for (const f of findings) {
       const status = f.level === "ok" ? "ok" : f.level === "warn" ? "WARNING" : "PROBLEM";
       console.log(`${f.label.padEnd(25)}${status}`);

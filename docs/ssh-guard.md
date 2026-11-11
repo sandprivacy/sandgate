@@ -158,6 +158,30 @@ could not log in. `doctor` flags such an install, and
 After an `openssh-server` upgrade, run `doctor`: if the package replaced
 `/etc/pam.d/sshd`, the hook is gone and logins stop asking you.
 
+## Your servers on your phone (heartbeat)
+
+`install` and `setup` also start a systemd timer,
+`sandgate-heartbeat.timer`. Every five minutes it sends your phone the
+server's state, sealed with the pairing key like everything else (the
+relay reads nothing):
+
+- online, or **silent since 14:05**: a server that misses three beats
+  rings your phone once, and again when it is back;
+- its addresses, OS, OpenSSH version and sandgate version, with
+  "update available" when the relay runs a newer release;
+- notify or blocking, key + phone or password + phone;
+- **`doctor`'s problems, in red**: a server whose wiring breaks (an
+  `openssh-server` upgrade that replaced `/etc/pam.d/sshd`, a
+  configuration sshd itself refuses) shows on your phone before you
+  find out by being locked out;
+- load, memory, disk, uptime.
+
+The timer runs apart from the login path: a heartbeat that fails
+changes nothing about who can log in. `sandgate ssh-guard heartbeat`
+sends one by hand. `uninstall` removes the timer and tells the relay,
+so a server you removed is not reported as dead. Without systemd, run
+`sandgate ssh-guard heartbeat` from cron every five minutes.
+
 ## If you lose access anyway
 
 From your provider's console (this is why it must keep working):

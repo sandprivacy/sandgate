@@ -165,7 +165,15 @@ themselves end-to-end encrypted, so no push service sees it:
 
 ```json
 { "type": "approval", "pairId": "…", "requestId": "…", "payload": { "iv": "…", "ct": "…" } }
+{ "type": "server", "pairId": "…", "state": "offline" | "online", "since": 1700000000000 }
 ```
+
+Every device that subscribed to a pairing is pushed to (a pairing kept
+one subscription before 0.9.1, so a second device silently took the
+pushes from the first). Pushes go out with `Urgency: high`, and with a
+TTL equal to the request's `ttlSec` (sent by the gateway in
+`POST /api/request`; 600 s by default, clamped to 30–3600). A push
+service answering 404 or 410 drops the subscription.
 
 A native client cannot use this: APNs and FCM need the app's own
 credentials. Two honest options, neither of which weakens the channel:
@@ -183,9 +191,26 @@ credentials. Two honest options, neither of which weakens the channel:
 ```
 GET  /api/pair-status?pairId=<id>   { subscribed, seen, claimed, claimPending }
 POST /api/abandon { pairId, requestId }   a gateway that stopped waiting
-GET  /api/health                    { ok, uptime_sec, pairings, active_requests }
+GET  /api/health                    { ok, version, uptime_sec, pairings, active_requests }
 GET  /api/metrics                   Prometheus text
 ```
+
+Server heartbeats (`sandgate ssh-guard heartbeat`, every 5 minutes):
+
+```
+POST   /api/status { pairId, payload, intervalSec }   payload = seal(status, aad "status:<pairId>")
+GET    /api/status?pairId=<id>   → { status: { payload, receivedAt, intervalSec } | null, now, quietAfterMs }
+DELETE /api/status { pairId }    uninstall: stopped on purpose, not dead
+```
+
+The relay keeps the latest blob only and refuses one closer than 20 s
+to the previous (429). It can read nothing but *when* a pairing last
+spoke: past `quietAfterMs` (three missed beats plus a minute, at least
+ten minutes) it pushes `{ type: "server", state: "offline" }` once, and
+`"online"` when the next beat arrives. The app ages a status by the
+relay's clock, unless the sealed `ts` is more than ten minutes older
+than `receivedAt` — an old heartbeat replayed does not pass for a live
+server. The SSE stream also carries a `status` event.
 
 Rate limits: 12 requests/minute and 5 undecided per pairing; 240 API
 calls/minute per client address. A client that polls sensibly never

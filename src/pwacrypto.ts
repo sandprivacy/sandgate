@@ -65,6 +65,8 @@ export function open<T>(key: Buffer, sealed: SealedMessage, aad: string): T {
 
 export const aadForRequest = (requestId: string) => `req:${requestId}`;
 export const aadForDecision = (requestId: string) => `dec:${requestId}`;
+/** A server's heartbeat: bound to its pairing, never mistaken for a request. */
+export const aadForStatus = (pairId: string) => `status:${pairId}`;
 
 /**
  * One-time pairing claims.

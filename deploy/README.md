@@ -60,6 +60,18 @@ sudo systemctl enable --now sandgate-relay
 - `GET /api/metrics` — Prometheus text: requests, decisions, push sent/failed, claims issued/collected, rate-limited calls, active requests, pairings. Nothing per user.
 - Rate limits: 12 requests/min and 5 undecided per pairing (against flooding a phone), 240 API calls/min per client address (against invented pair ids). Behind a proxy the first `X-Forwarded-For` hop is the client.
 
+## Upgrading
+
+The relay also serves the phone app, so upgrading the relay is how a fix
+to the app reaches phones: restart it on the new version, and the page
+and its worker (served `Cache-Control: no-cache`) load fresh on the next
+open. What a phone has paired lives in the phone's own storage for the
+relay's origin — an upgrade does not touch it; changing the domain does.
+
+Keep `relay-state.json` across the upgrade (same `SANDGATE_HOME`, or the
+same volume in Docker). Regenerated VAPID keys do not fail loudly: every
+existing push subscription simply stops ringing.
+
 ## Backing it up
 
 `relay-state.json` holds the VAPID key pair and every push subscription. Lose it and every phone must re-run `sandgate pair` (and, for servers, `ssh-guard pair`); nothing else is lost. Copy it with the rest of the host's backups, mode 0600:

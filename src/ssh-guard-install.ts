@@ -992,6 +992,46 @@ export function analyzeWiring(input: {
   return findings;
 }
 
+/**
+ * Gather what `doctor` reads and run the analysis: sshd's resolved
+ * settings, globally and for root and the admin with Match blocks
+ * applied. Shared by `doctor` and the heartbeat, so the phone shows the
+ * same verdict a human would get at the terminal.
+ */
+export function gatherFindings(): Finding[] | null {
+  if (!existsSync(PAM_FILE)) return null;
+  const accounts = [...new Set(["root", adminAccount()])].map((user) => {
+    const settings = effectiveSshdSettings(matchSpec(user));
+    return { user, settings, usesKey: userHasKey(user, settings) !== false };
+  });
+  const global = effectiveSshdSettings();
+  const findings = analyzeWiring({ pamText: readFileSync(PAM_FILE, "utf8"), global, accounts });
+  if (global === null) {
+    // No answer from `sshd -T` used to mean "skip the checks" — and an
+    // unreadable configuration then printed "All good". As root, sshd
+    // refusing its own configuration is the worst finding there is: the
+    // next restart (a reboot, an upgrade) leaves no sshd at all.
+    findings.unshift(sshdUnreadableFinding(isRoot(), sshdConfigIsValid()));
+  }
+  return findings;
+}
+
+/** Pure: what to report when `sshd -T` gave nothing. */
+export function sshdUnreadableFinding(root: boolean, check: { ok: boolean; output: string }): Finding {
+  if (!root) {
+    return { level: "warn", label: "sshd settings", detail: "run doctor as root (sudo) to check sshd's configuration" };
+  }
+  return {
+    level: "fail",
+    label: "sshd configuration",
+    detail:
+      "sshd rejects its own configuration — it keeps running for now, but will not start again " +
+      "(reboot, upgrade):\n    " +
+      (check.output.trim() || "sshd -T failed").split("\n").slice(0, 4).join("\n    ") +
+      "\n    fix the file it names, or rerun `sandgate ssh-guard install`",
+  };
+}
+
 export function uninstallHook(): InstallReport {
   const report: InstallReport = { steps: [], backups: [], rolledBack: false };
   if (existsSync(DROPIN_FILE)) {
