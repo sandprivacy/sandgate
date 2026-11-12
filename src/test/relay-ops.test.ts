@@ -101,7 +101,7 @@ test("health says the relay is up and its version, nothing about its use", async
       body: JSON.stringify({ pairId }),
     });
     const body = await (await fetch(`${url}/api/health`)).json();
-    assert.deepEqual(Object.keys(body).sort(), ["ok", "version"]);
+    assert.deepEqual(Object.keys(body).sort(), ["ok", "server", "version"]);
     assert.equal(body.ok, true);
   });
 });

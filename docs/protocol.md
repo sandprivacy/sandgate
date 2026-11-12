@@ -223,7 +223,7 @@ credentials. Two honest options, neither of which weakens the channel:
 ```
 GET  /api/pair-status?pairId=<id>   { subscribed, seen, claimed, claimPending }
 POST /api/abandon { pairId, requestId }   a gateway that stopped waiting
-GET  /api/health                    { ok, version }
+GET  /api/health                    { ok, version, server }   (server: last release that changed ssh-guard)
 GET  /api/metrics                   Prometheus text, operator only: Authorization: Bearer <token>, else 404
 ```
 

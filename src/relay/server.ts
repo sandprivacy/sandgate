@@ -6,7 +6,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import webpush from "web-push";
 import { PWA_HTML, PWA_SW, pwaManifest } from "./pwa-page.js";
 import { ICON_SVG, iconPng } from "./icons.js";
-import { VERSION } from "../version.js";
+import { SERVER_VERSION, VERSION } from "../version.js";
 
 /**
  * The sandgate relay: bridges a gateway (on a computer) and the paired
@@ -711,8 +711,9 @@ export async function startRelay(opts: {
       }
       if (req.method === "GET" && url.pathname === "/api/health") {
         // Public, so nothing about use: counts live behind /api/metrics.
-        // The version stays — the phone compares it with each server's.
-        return json(res, 200, { ok: true, version: VERSION });
+        // The versions stay: "server" is what the phone compares with each
+        // server's heartbeat (see SERVER_VERSION).
+        return json(res, 200, { ok: true, version: VERSION, server: SERVER_VERSION });
       }
       if (req.method === "GET" && url.pathname === "/api/vapid") {
         return json(res, 200, { publicKey: state.vapid.publicKey });

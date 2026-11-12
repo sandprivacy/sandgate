@@ -177,13 +177,38 @@ function describeServerPush(data, store) {
   };
 }
 
+// The app open and in front of you already shows the card (or the server
+// alert): ringing on top of it is noise. How to stay quiet depends on the
+// browser. Chromium waives the "every push shows a notification" rule
+// while a page of the site is visible, so it shows nothing. Safari does
+// not: a push that shows nothing counts as silent, and after three it
+// cancels the subscription for good. There, the notification is shown,
+// silent, and closed at once.
+var UA = (typeof navigator !== "undefined" && navigator.userAgent) || "";
+var CHROMIUM = /Chrome\\/|Chromium\\//.test(UA) && !/iPhone|iPad|iPod/.test(UA);
+async function appInFront() {
+  try {
+    var list = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    return list.some(function (c) { return c.visibilityState === "visible" && c.focused !== false; });
+  } catch (e) { return false; }
+}
+
 self.addEventListener("push", function (e) {
   e.waitUntil((async function () {
     var data = null;
     try { data = e.data ? e.data.json() : null; } catch (err) {}
     var store = await loadStore();
     var desc = data && data.type === "server" ? describeServerPush(data, store) : await describePush(data, store);
+    var front = await appInFront();
+    if (front && CHROMIUM) { await refreshPages(); return; }
+    if (front) desc.options.silent = true;
     await self.registration.showNotification(desc.title, desc.options);
+    if (front && self.registration.getNotifications) {
+      try {
+        var shown = await self.registration.getNotifications({ tag: desc.options.tag });
+        shown.forEach(function (n) { n.close(); });
+      } catch (err) {}
+    }
     await refreshPages();
   })());
 });
@@ -254,6 +279,15 @@ const CHECK_ICON =
 const CROSS_ICON =
   '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>';
 
+const tabIcon = (paths: string) =>
+  `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+const TAB_ICONS = {
+  req: tabIcon('<path d="M4 13l2.5-7h11L20 13v5H4z"/><path d="M4 13h4.5l1 2h5l1-2H20"/>'),
+  srv: tabIcon('<rect x="4" y="4" width="16" height="6" rx="1.5"/><rect x="4" y="14" width="16" height="6" rx="1.5"/><path d="M8 7h.01M8 17h.01"/>'),
+  hist: tabIcon('<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>'),
+  set: tabIcon('<path d="M5 7h9M18 7h1M5 17h1M10 17h9"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>'),
+};
+
 export const PWA_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -293,13 +327,13 @@ export const PWA_HTML = `<!doctype html>
   header {
     position: sticky; top: 0; z-index: 2;
     display: flex; align-items: center; gap: 12px;
-    padding: calc(env(safe-area-inset-top, 0px) + 14px) 18px 14px;
+    padding: calc(env(safe-area-inset-top, 0px) + 10px) 18px 10px;
     background: color-mix(in srgb, var(--ground) 88%, transparent);
     backdrop-filter: blur(10px);
     border-bottom: 1px solid var(--line);
   }
   .logo {
-    width: 38px; height: 38px; border-radius: 10px;
+    width: 34px; height: 34px; border-radius: 10px;
     background: linear-gradient(145deg, #241f14, #1a1610);
     border: 1px solid #453a1e;
     display: grid; place-items: center;
@@ -319,7 +353,48 @@ export const PWA_HTML = `<!doctype html>
   .pill.warn { background: #332a17; color: var(--accent); border-color: #4a3d1f; }
   .pill.err  { background: #331d17; color: #d98a76; border-color: #4a2a1f; }
 
-  main { max-width: 520px; margin: 0 auto; padding: 18px 16px calc(env(safe-area-inset-bottom, 0px) + 40px); }
+  main { max-width: 520px; margin: 0 auto; padding: 16px 16px calc(env(safe-area-inset-bottom, 0px) + 96px); }
+
+  /* One screen per job, a tab bar at the thumb: requests never sit above
+     a page of servers and history again. */
+  .view { display: none; }
+  .view.on { display: block; }
+  .tabs {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 3;
+    display: flex; justify-content: center;
+    padding: 6px 8px calc(env(safe-area-inset-bottom, 0px) + 6px);
+    background: color-mix(in srgb, var(--ground) 92%, transparent);
+    backdrop-filter: blur(10px);
+    border-top: 1px solid var(--line);
+  }
+  .tabs[hidden] { display: none; }
+  .tabs button {
+    position: relative; flex: 1; max-width: 130px;
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 6px 0 4px; border: 0; background: none; cursor: pointer;
+    color: var(--soft); font: 600 11px/1.2 inherit; font-family: inherit; letter-spacing: .02em;
+  }
+  .tabs button[aria-selected="true"] { color: var(--accent); }
+  .tabs .badge {
+    position: absolute; top: 0; left: calc(50% + 6px);
+    min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+    background: var(--accent); color: #1a1508;
+    font: 700 11px/18px inherit; font-family: inherit; font-style: normal; text-align: center;
+  }
+  .tabs .badge.red { background: var(--no); color: #fff; }
+  .tabs .badge:empty { display: none; }
+
+  .alert {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    margin: 0 0 14px; padding: 11px 14px; border-radius: 12px; cursor: pointer;
+    background: rgba(194,86,62,.13); border: 1px solid #4a2a1f; color: #e8a28f;
+    font: 600 14px/1.35 inherit; font-family: inherit; text-align: left;
+  }
+  .alert .txt { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .alert::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--no); flex: none; }
+  .section-h { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--soft); margin: 22px 0 6px; }
+  .section-h:first-child { margin-top: 2px; }
+  .note { color: var(--soft); font-size: 12.5px; margin: 10px 0 0; }
 
   .banner {
     background: var(--panel-raised); border: 1px solid #4a3d1f; border-radius: 14px;
@@ -339,6 +414,7 @@ export const PWA_HTML = `<!doctype html>
     border-radius: 14px;
     padding: 16px 16px 14px;
     margin-bottom: 14px;
+    scroll-margin-top: calc(env(safe-area-inset-top, 0px) + 72px);
     animation: rise .25s ease-out;
   }
   @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
@@ -366,7 +442,7 @@ export const PWA_HTML = `<!doctype html>
   .expired { opacity: .45; }
   .expired h2 { text-decoration: line-through; text-decoration-thickness: 1px; }
 
-  .empty { text-align: center; padding: 72px 20px; color: var(--soft); }
+  .empty { text-align: center; padding: 56px 20px; color: var(--soft); }
   .empty .mark { color: var(--accent); opacity: .3; margin-bottom: 16px; }
   .empty .big { font-size: 16px; color: #cfc6b2; margin-bottom: 4px; }
   .empty .hint { font-size: 13px; }
@@ -387,10 +463,8 @@ export const PWA_HTML = `<!doctype html>
   }
   .setup input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
-  .hist { margin-top: 30px; }
-  .hist h3 { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--soft); margin: 0 0 8px; }
   .hrow { display: flex; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
-  .hrow .time { color: var(--soft); font-variant-numeric: tabular-nums; font-size: 12px; min-width: 74px; }
+  .hrow .time { color: var(--soft); font-variant-numeric: tabular-nums; font-size: 12px; min-width: 46px; }
   .hrow .t { flex: 1; color: #cfc6b2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .hrow .d { font-weight: 650; font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase; }
   .d.approved { color: #7fbf9a; }
@@ -400,25 +474,36 @@ export const PWA_HTML = `<!doctype html>
   .hrow.tap { cursor: pointer; }
   .hrow.open .t { white-space: normal; }
   .hmore {
-    padding: 8px 10px 10px 84px; border-bottom: 1px solid var(--line);
+    padding: 8px 10px 10px 56px; border-bottom: 1px solid var(--line);
     color: #cfc6b2; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere;
   }
   .jump {
-    position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+    position: fixed; left: 50%; bottom: calc(76px + env(safe-area-inset-bottom)); transform: translateX(-50%);
     z-index: 10; border: 0; border-radius: 999px; padding: 11px 18px;
     background: var(--accent); color: #1a1408; font: 650 14.5px/1 inherit; font-family: inherit;
     box-shadow: 0 6px 24px rgba(0,0,0,.45); cursor: pointer;
   }
 
-  .srv { padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .sum { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: var(--soft); margin: 2px 0 10px; }
+  .sum b { color: var(--ink); font-weight: 650; }
+  .sum .bad b { color: #e8a28f; }
+  .srv { padding: 11px 2px; border-bottom: 1px solid var(--line); font-size: 13px; cursor: pointer; }
   .srv .top { display: flex; gap: 8px; align-items: center; }
   .srv .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--soft); flex: none; }
   .srv .dot.up { background: #7fbf9a; }
   .srv .dot.down { background: var(--no); }
-  .srv .name { flex: 1; color: var(--ink); font-weight: 650; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .srv .seen { color: var(--soft); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .srv .name { flex: 1; color: var(--ink); font-weight: 650; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srv .seen { color: var(--soft); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .srv .seen.down { color: #d98a76; font-weight: 650; }
-  .srv .meta { color: var(--soft); margin-top: 3px; overflow-wrap: anywhere; }
+  .srv .chev { color: var(--soft); font-size: 12px; transition: transform .15s; }
+  .srv.open .chev { transform: rotate(90deg); }
+  .srv .line { margin: 3px 0 0 16px; color: var(--soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srv .line.fail { color: #e8a28f; font-weight: 600; }
+  .srv .line.warn { color: var(--accent); }
+  .srv .more { display: none; margin-left: 16px; }
+  .srv.open .more { display: block; }
+  .srv.open .line { white-space: normal; }
+  .srv .meta { color: var(--soft); margin-top: 4px; overflow-wrap: anywhere; }
   .srv .flag { margin-top: 6px; padding: 7px 9px; border-radius: 8px; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .srv .flag.fail { background: rgba(217,138,118,.12); color: #e8a28f; }
   .srv .flag.warn { background: rgba(217,164,65,.12); color: var(--accent); }
@@ -464,11 +549,21 @@ export const PWA_HTML = `<!doctype html>
   <div class="logo">${GATE_GLYPH(22, "mark")}</div>
   <div class="title">
     <h1>sandgate</h1>
-    <div class="sub">your agents ask. you decide.</div>
   </div>
   <div class="pill warn" id="status">starting</div>
 </header>
-<main><div id="banner"></div><div id="list"></div><div id="hist"></div></main>
+<main>
+  <section class="view on" id="v-req"><div id="banner"></div><div id="alerts"></div><div id="list"></div></section>
+  <section class="view" id="v-srv"><div id="servers"></div></section>
+  <section class="view" id="v-hist"><div id="hist"></div></section>
+  <section class="view" id="v-set"><div id="vaults"></div></section>
+</main>
+<nav class="tabs" id="tabs" hidden>
+  <button data-tab="req" aria-selected="true">${TAB_ICONS.req}<span>Requests</span><i class="badge" id="b-req"></i></button>
+  <button data-tab="srv" aria-selected="false">${TAB_ICONS.srv}<span>Servers</span><i class="badge red" id="b-srv"></i></button>
+  <button data-tab="hist" aria-selected="false">${TAB_ICONS.hist}<span>History</span></button>
+  <button data-tab="set" aria-selected="false">${TAB_ICONS.set}<span>Settings</span></button>
+</nav>
 <script>
 (function () {
   var PAIR_KEY = "sandgate_pair";
@@ -770,6 +865,39 @@ export const PWA_HTML = `<!doctype html>
   }
   renderBanner();
 
+  // --- tabs ----------------------------------------------------------------
+  // Requests, servers, history and settings used to be one long page: a
+  // card could land out of sight above a screenful of servers, and a
+  // silent server sat somewhere below the history. One screen each now.
+  var tabsEl = document.getElementById("tabs");
+  var currentTab = "req";
+  tabsEl.hidden = false;
+  function showTab(name) {
+    currentTab = name;
+    ["req", "srv", "hist", "set"].forEach(function (t) {
+      document.getElementById("v-" + t).className = "view" + (t === name ? " on" : "");
+      tabsEl.querySelector('[data-tab="' + t + '"]').setAttribute("aria-selected", t === name ? "true" : "false");
+    });
+    window.scrollTo(0, 0);
+    updateJumpPill();
+  }
+  Array.prototype.forEach.call(tabsEl.querySelectorAll("button"), function (b) {
+    b.onclick = function () { showTab(b.getAttribute("data-tab")); };
+  });
+  function setBadge(id, n) {
+    var el = document.getElementById(id);
+    el.textContent = n > 0 ? String(n) : "";
+  }
+
+  // The app on screen is the notification: clear what the lock screen
+  // still shows, it is all here (and some of it already answered).
+  function clearNotifications() {
+    swRegPromise
+      .then(function (reg) { return reg && reg.getNotifications ? reg.getNotifications() : []; })
+      .then(function (list) { list.forEach(function (n) { n.close(); }); })
+      .catch(function () {});
+  }
+
   // --- crypto (mirror of pwacrypto.ts), one derived key per vault ----------
   var keyCache = {};
   async function deriveKeyFrom(secretB64u, info) {
@@ -920,6 +1048,7 @@ export const PWA_HTML = `<!doctype html>
     await registerSubscription(existing);
     pushOn = true;
     setStatus("push on");
+    renderVaults();
     return true;
   }
 
@@ -940,6 +1069,7 @@ export const PWA_HTML = `<!doctype html>
     await registerSubscription(sub);
     pushOn = true;
     setStatus("push on");
+    renderVaults();
     var btn = document.getElementById("pushBtn");
     if (btn && btn.parentElement) btn.parentElement.remove();
     return true;
@@ -1042,24 +1172,40 @@ export const PWA_HTML = `<!doctype html>
     try { localStorage.setItem(HIST_KEY, JSON.stringify(entries)); } catch (e) {}
     renderHist();
   }
-  function histTime(ts) {
+  function hhmm(d) { return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2); }
+  /** "14:05" today, "yesterday 14:05", "03/11 14:05" before. */
+  function when(ts) {
+    var d = new Date(ts);
+    var label = dayLabel(ts);
+    return label === "Today" ? hhmm(d) : (label === "Yesterday" ? "yesterday" : label) + " " + hhmm(d);
+  }
+  function dayLabel(ts) {
     var d = new Date(ts), now = new Date();
-    var hm = ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
-    if (d.toDateString() === now.toDateString()) return hm;
-    return ("0" + d.getDate()).slice(-2) + "/" + ("0" + (d.getMonth() + 1)).slice(-2) + " " + hm;
+    if (d.toDateString() === now.toDateString()) return "Today";
+    var y = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+    if (d.toDateString() === y.toDateString()) return "Yesterday";
+    return ("0" + d.getDate()).slice(-2) + "/" + ("0" + (d.getMonth() + 1)).slice(-2);
+  }
+  function sectionHead(text) {
+    var h = document.createElement("div"); h.className = "section-h"; h.textContent = text;
+    return h;
   }
   function renderHist() {
     var entries = loadHist();
     histEl.textContent = "";
-    if (!entries.length) return;
+    if (!entries.length) {
+      var none = document.createElement("div"); none.className = "empty";
+      none.innerHTML = '<div class="big">Nothing decided yet.</div><div class="hint">What you approve or deny on this device is listed here.</div>';
+      histEl.appendChild(none);
+      return;
+    }
     var section = document.createElement("div");
-    section.className = "hist";
-    var h = document.createElement("h3");
-    h.textContent = "Recent — this device";
-    section.appendChild(h);
+    var lastDay = null;
     entries.forEach(function (entry) {
+      var day = dayLabel(entry.ts);
+      if (day !== lastDay) { section.appendChild(sectionHead(day)); lastDay = day; }
       var row = document.createElement("div"); row.className = "hrow tap";
-      var time = document.createElement("span"); time.className = "time"; time.textContent = histTime(entry.ts);
+      var time = document.createElement("span"); time.className = "time"; time.textContent = hhmm(new Date(entry.ts));
       var t = document.createElement("span"); t.className = "t"; t.textContent = entry.t;
       var d = document.createElement("span"); d.className = "d " + entry.d; d.textContent = entry.d;
       row.appendChild(time); row.appendChild(t); row.appendChild(d);
@@ -1075,6 +1221,9 @@ export const PWA_HTML = `<!doctype html>
       };
       section.appendChild(row);
     });
+    var note = document.createElement("p"); note.className = "note";
+    note.textContent = "Kept on this device only, the last 50 at most. Tap a line for the details.";
+    section.appendChild(note);
     histEl.appendChild(section);
   }
   renderHist();
@@ -1095,10 +1244,9 @@ export const PWA_HTML = `<!doctype html>
     }
   }
 
-  // A request arriving while you are scrolled down to the history or the
-  // servers was invisible: cards sit at the top. A pill says so and takes
-  // you there; coming back to the app (a tap on a notification) scrolls
-  // to the waiting card by itself.
+  // A request arriving while you are on another tab, or scrolled down a
+  // list of cards, is out of sight. A pill says so and takes you there;
+  // coming back to the app (a tap on a notification) goes there by itself.
   var jumpEl = null;
   var scrollToCards = false;
   function liveCards() {
@@ -1108,9 +1256,10 @@ export const PWA_HTML = `<!doctype html>
   }
   function updateJumpPill() {
     var live = liveCards();
+    setBadge("b-req", live.length);
     var first = live.length ? live[0].el : null;
-    var r = first ? first.getBoundingClientRect() : null;
-    var offscreen = !!r && (r.bottom < 40 || r.top > window.innerHeight - 40);
+    var r = first && currentTab === "req" ? first.getBoundingClientRect() : null;
+    var offscreen = currentTab !== "req" || (!!r && (r.bottom < 120 || r.top > window.innerHeight - 140));
     if (live.length && offscreen) {
       if (!jumpEl) {
         jumpEl = document.createElement("button");
@@ -1124,15 +1273,23 @@ export const PWA_HTML = `<!doctype html>
       jumpEl = null;
     }
   }
+  // To the very top: the cards are the first thing on the Requests tab.
+  // scrollIntoView put the card's top under the sticky header, so all you
+  // saw was its buttons — not what you were approving.
   function revealCards() {
-    var live = liveCards();
-    if (!live.length) return;
-    try { live[0].el.scrollIntoView({ behavior: "smooth", block: "start" }); }
+    if (!liveCards().length) return;
+    if (currentTab !== "req") showTab("req");
+    try { window.scrollTo({ top: 0, behavior: "smooth" }); }
     catch (e) { window.scrollTo(0, 0); }
     setTimeout(updateJumpPill, 600);
   }
   window.addEventListener("scroll", function () { updateJumpPill(); }, { passive: true });
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) scrollToCards = true; });
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) return;
+    scrollToCards = true;
+    clearNotifications();
+  });
+  clearNotifications();
 
   // Push, SSE and the safety poll all trigger refreshes, and they arrive
   // together. Two of them used to race in the gap between "do I have this
@@ -1430,15 +1587,11 @@ export const PWA_HTML = `<!doctype html>
   }
 
   // --- vault manager -------------------------------------------------------
-  var vaultsEl = document.createElement("div");
-  histEl.parentElement.appendChild(vaultsEl);
+  var vaultsEl = document.getElementById("vaults");
   function renderVaults() {
     vaultsEl.textContent = "";
     var section = document.createElement("div");
-    section.className = "hist";
-    var h = document.createElement("h3");
-    h.textContent = "Vaults";
-    section.appendChild(h);
+    section.appendChild(sectionHead("Vaults and servers paired with this device"));
     pairs.forEach(function (p, idx) {
       var row = document.createElement("div"); row.className = "hrow";
       var t = document.createElement("span"); t.className = "t"; t.textContent = p.name;
@@ -1448,7 +1601,7 @@ export const PWA_HTML = `<!doctype html>
         var next = prompt("Name for this vault", p.name);
         if (next && next.trim()) { p.name = next.trim().slice(0, 40); savePairs(); renderVaults(); }
       };
-      var x = document.createElement("span"); x.className = "d denied"; x.textContent = "remove";
+      var x = document.createElement("span"); x.className = "d expired"; x.textContent = "remove";
       x.style.cursor = "pointer";
       x.onclick = function () {
         if (!confirm("Remove " + p.name + " from this device?")) return;
@@ -1472,21 +1625,8 @@ export const PWA_HTML = `<!doctype html>
       row.appendChild(t); row.appendChild(x);
       section.appendChild(row);
     });
-    var detRow = document.createElement("div"); detRow.className = "hrow";
-    var detLabel = document.createElement("span"); detLabel.className = "t";
-    detLabel.textContent = "Show details in notifications";
-    var detToggle = document.createElement("span"); detToggle.className = "d " + (notifDetails() ? "approved" : "denied");
-    detToggle.textContent = notifDetails() ? "on" : "off";
-    detToggle.style.cursor = "pointer";
-    detToggle.onclick = function () {
-      try { localStorage.setItem(DETAILS_KEY, notifDetails() ? "off" : "on"); } catch (e) {}
-      syncStore();
-      renderVaults();
-    };
-    detRow.appendChild(detLabel); detRow.appendChild(detToggle);
-    section.appendChild(detRow);
     var addRow = document.createElement("div"); addRow.className = "hrow";
-    var add = document.createElement("span"); add.className = "d approved"; add.textContent = "+ add a vault";
+    var add = document.createElement("span"); add.className = "d approved"; add.textContent = "+ add a vault or a server";
     add.style.cursor = "pointer";
     add.onclick = function () {
       if (document.getElementById("addPaste")) return;
@@ -1507,6 +1647,33 @@ export const PWA_HTML = `<!doctype html>
     };
     addRow.appendChild(add);
     section.appendChild(addRow);
+    var hint = document.createElement("p"); hint.className = "note";
+    hint.textContent = "Tap a name to rename it.";
+    section.appendChild(hint);
+    section.appendChild(sectionHead("Notifications"));
+    var detRow = document.createElement("div"); detRow.className = "hrow";
+    var detLabel = document.createElement("span"); detLabel.className = "t";
+    detLabel.textContent = "Show details in notifications";
+    var detToggle = document.createElement("span"); detToggle.className = "d " + (notifDetails() ? "approved" : "denied");
+    detToggle.textContent = notifDetails() ? "on" : "off";
+    detToggle.style.cursor = "pointer";
+    detToggle.onclick = function () {
+      try { localStorage.setItem(DETAILS_KEY, notifDetails() ? "off" : "on"); } catch (e) {}
+      syncStore();
+      renderVaults();
+    };
+    detRow.appendChild(detLabel); detRow.appendChild(detToggle);
+    section.appendChild(detRow);
+    var pushRow = document.createElement("div"); pushRow.className = "hrow";
+    var pushLabel = document.createElement("span"); pushLabel.className = "t";
+    pushLabel.textContent = "Push on this device";
+    var pushState = document.createElement("span"); pushState.className = "d " + (pushOn ? "approved" : "expired");
+    pushState.textContent = pushOn ? "on" : "off";
+    pushRow.appendChild(pushLabel); pushRow.appendChild(pushState);
+    section.appendChild(pushRow);
+    var ver = document.createElement("p"); ver.className = "note";
+    ver.textContent = "While the app is open, nothing rings: requests appear here directly.";
+    section.appendChild(ver);
     vaultsEl.appendChild(section);
   }
   renderVaults();
@@ -1514,8 +1681,7 @@ export const PWA_HTML = `<!doctype html>
   // --- servers: sealed heartbeats from ssh-guard ---------------------------
   // Each server sends its status every few minutes, sealed with its own
   // pairing key; the relay hands back the latest blob and when it came.
-  var serversEl = document.createElement("div");
-  histEl.parentElement.insertBefore(serversEl, histEl);
+  var serversEl = document.getElementById("servers");
   var statuses = {}; // pairId -> { st, ageAt, fetchedAt, quietAfterMs }
   var latestVersion = null;
 
@@ -1549,7 +1715,10 @@ export const PWA_HTML = `<!doctype html>
     statusBusy = true;
     try {
       if (!latestVersion) {
-        try { latestVersion = (await (await fetch("/api/health")).json()).version || null; } catch (e) {}
+        // "server": the last release that changed what a server runs. A
+        // release that only touches this app must not tell every server
+        // to update.
+        try { var hb = await (await fetch("/api/health")).json(); latestVersion = hb.server || hb.version || null; } catch (e) {}
       }
       if (!pairs.length) return;
       var all;
@@ -1583,71 +1752,145 @@ export const PWA_HTML = `<!doctype html>
     }
   }
 
+  // One line per server, the ones that need you first: silent, then broken,
+  // then a warning, then the rest. A tap unfolds the details.
+  var openSrv = {};
+  function serverView(p) {
+    var entry = statuses[p.pairId], st = entry.st;
+    var age = entry.age + (Date.now() - entry.fetchedAt);
+    var down = age > entry.quietAfterMs;
+    var flags = [];
+    if (latestVersion && versionLess(st.sandgate, latestVersion)) {
+      flags.push({ level: "warn", label: "update available", detail: st.sandgate + " → " + latestVersion + " (replace the binary with mv, see the docs)" });
+    }
+    if (!st.doctor) {
+      flags.push({ level: "warn", label: "doctor not run", detail: "the heartbeat could not read the sshd configuration" });
+    } else {
+      (st.doctor.findings || []).forEach(function (f) { flags.push({ level: f.level === "fail" ? "fail" : "warn", label: f.label, detail: f.detail }); });
+    }
+    if (!st.hatch) flags.push({ level: "warn", label: "no escape hatch", detail: "no exempt user and not in notify mode: a flat phone means no SSH" });
+    var used = st.disk ? st.disk.total - st.disk.free : 0;
+    if (st.disk && st.disk.total && st.disk.free / st.disk.total < 0.1) flags.push({ level: "warn", label: "disk almost full", detail: bytesPct(used, st.disk.total) + " used" });
+    var fails = flags.filter(function (f) { return f.level === "fail"; });
+    var rank = down ? 0 : fails.length ? 1 : flags.length ? 2 : 3;
+    return { p: p, st: st, age: age, down: down, flags: flags, fails: fails, rank: rank, used: used };
+  }
+
   function renderServers() {
     serversEl.textContent = "";
-    var ids = pairs.filter(function (p) { return statuses[p.pairId]; });
-    if (!ids.length) return;
-    var section = document.createElement("div");
-    section.className = "hist";
-    var h = document.createElement("h3");
-    h.textContent = "Servers";
-    section.appendChild(h);
-    ids.forEach(function (p) {
-      var entry = statuses[p.pairId], st = entry.st;
-      var age = entry.age + (Date.now() - entry.fetchedAt);
-      var down = age > entry.quietAfterMs;
-      var row = document.createElement("div"); row.className = "srv";
+    var views = pairs.filter(function (p) { return statuses[p.pairId]; }).map(serverView);
+    views.sort(function (a, b) { return a.rank - b.rank || String(a.p.name).localeCompare(String(b.p.name)); });
+    renderAlerts(views.filter(function (v) { return v.rank <= 1; }));
+    if (!views.length) {
+      var none = document.createElement("div"); none.className = "empty";
+      none.innerHTML = '<div class="big">No server reports yet.</div><div class="hint">A server running sandgate ssh-guard reports here every five minutes.</div>';
+      serversEl.appendChild(none);
+      return;
+    }
+    var nDown = views.filter(function (v) { return v.down; }).length;
+    var nFail = views.filter(function (v) { return !v.down && v.fails.length; }).length;
+    var sum = document.createElement("div"); sum.className = "sum";
+    function part(n, label, bad) {
+      var s = document.createElement("span"); if (bad) s.className = "bad";
+      var b = document.createElement("b"); b.textContent = String(n);
+      s.appendChild(b); s.appendChild(document.createTextNode(" " + label));
+      sum.appendChild(s);
+    }
+    part(views.length - nDown, "online");
+    if (nDown) part(nDown, "silent", true);
+    if (nFail) part(nFail, nFail > 1 ? "with problems" : "with a problem", true);
+    serversEl.appendChild(sum);
+
+    views.forEach(function (v) {
+      var st = v.st, p = v.p;
+      var row = document.createElement("div");
+      row.className = "srv" + (openSrv[p.pairId] ? " open" : "");
+      row.onclick = function () {
+        openSrv[p.pairId] = !openSrv[p.pairId];
+        row.classList.toggle("open", !!openSrv[p.pairId]);
+      };
 
       var top = document.createElement("div"); top.className = "top";
-      var dot = document.createElement("span"); dot.className = "dot " + (down ? "down" : "up");
+      var dot = document.createElement("span"); dot.className = "dot " + (v.down ? "down" : "up");
       var name = document.createElement("span"); name.className = "name"; name.textContent = p.name;
-      var seen = document.createElement("span"); seen.className = "seen" + (down ? " down" : "");
-      seen.textContent = down ? "silent · " + ago(age) : "online · " + ago(age);
-      top.appendChild(dot); top.appendChild(name); top.appendChild(seen);
+      var seen = document.createElement("span"); seen.className = "seen" + (v.down ? " down" : "");
+      seen.textContent = v.down ? "silent since " + when(Date.now() - v.age) : "online · " + ago(v.age);
+      var chev = document.createElement("span"); chev.className = "chev"; chev.textContent = "›";
+      top.appendChild(dot); top.appendChild(name); top.appendChild(seen); top.appendChild(chev);
       row.appendChild(top);
 
+      // The one line you read without opening it: what is wrong, or where it is.
+      var line = document.createElement("div");
+      if (v.down) {
+        line.className = "line fail";
+        line.textContent = "Down, or cut off from the relay";
+      } else if (v.fails.length) {
+        line.className = "line fail";
+        line.textContent = v.fails.map(function (f) { return f.label; }).join(", ");
+      } else if (v.flags.length) {
+        line.className = "line warn";
+        line.textContent = v.flags.map(function (f) { return f.label; }).join(", ");
+      } else {
+        line.className = "line";
+        line.textContent = [(st.ips || [])[0], st.mode === "notify" ? "notify only" : "blocking"].filter(Boolean).join(" · ");
+      }
+      row.appendChild(line);
+
+      var more = document.createElement("div"); more.className = "more";
+      if (v.down) {
+        var last = document.createElement("div"); last.className = "meta";
+        last.textContent = "At its last heartbeat:";
+        more.appendChild(last);
+      }
       var meta1 = document.createElement("div"); meta1.className = "meta";
       meta1.textContent = [
         (st.ips || []).join(", "),
         st.os,
         st.openssh ? "OpenSSH " + st.openssh : null,
       ].filter(Boolean).join(" · ");
-      row.appendChild(meta1);
-
+      more.appendChild(meta1);
       var meta2 = document.createElement("div"); meta2.className = "meta";
-      var used = st.disk ? st.disk.total - st.disk.free : 0;
       meta2.textContent = [
         "sandgate " + st.sandgate,
         st.mode === "notify" ? "notify only" : "blocking",
         st.keyOnly ? "key + phone" : "password + phone",
         "load " + (st.load && st.load.length ? st.load[0] : "?") + (st.cpus ? "/" + st.cpus : ""),
         st.mem ? "mem " + bytesPct(st.mem.total - st.mem.free, st.mem.total) : null,
-        st.disk ? "disk " + bytesPct(used, st.disk.total) : null,
+        st.disk ? "disk " + bytesPct(v.used, st.disk.total) : null,
         "up " + upFor(st.uptimeSec || 0),
       ].filter(Boolean).join(" · ");
-      row.appendChild(meta2);
-
-      function flag(level, label, detail) {
-        var f = document.createElement("div"); f.className = "flag " + level;
-        var b = document.createElement("b"); b.textContent = label;
-        f.appendChild(b);
-        if (detail) f.appendChild(document.createTextNode(" — " + detail));
-        row.appendChild(f);
-      }
-      if (latestVersion && versionLess(st.sandgate, latestVersion)) {
-        flag("warn", "update available", st.sandgate + " → " + latestVersion + " (replace the binary with mv, see the docs)");
-      }
-      if (!st.doctor) {
-        flag("warn", "doctor not run", "the heartbeat could not read sshd's configuration");
-      } else {
-        (st.doctor.findings || []).forEach(function (f) { flag(f.level === "fail" ? "fail" : "warn", f.label, f.detail); });
-      }
-      if (!st.hatch) flag("warn", "no escape hatch", "no exempt user and not in notify mode: a flat phone means no SSH");
-      if (st.disk && st.disk.total && st.disk.free / st.disk.total < 0.1) flag("warn", "disk almost full", bytesPct(used, st.disk.total) + " used");
-
-      section.appendChild(row);
+      more.appendChild(meta2);
+      v.flags.forEach(function (f) {
+        var el = document.createElement("div"); el.className = "flag " + f.level;
+        var b = document.createElement("b"); b.textContent = f.label;
+        el.appendChild(b);
+        if (f.detail) el.appendChild(document.createTextNode(" — " + f.detail));
+        more.appendChild(el);
+      });
+      row.appendChild(more);
+      serversEl.appendChild(row);
     });
-    serversEl.appendChild(section);
+  }
+
+  // Requests is where you land: a server in trouble is named there, not
+  // two screens away.
+  var alertsEl = document.getElementById("alerts");
+  function renderAlerts(bad) {
+    alertsEl.textContent = "";
+    setBadge("b-srv", bad.length);
+    if (!bad.length) return;
+    var b = document.createElement("button"); b.className = "alert";
+    var t = document.createElement("span"); t.className = "txt";
+    var first = bad[0];
+    t.textContent = first.down
+      ? first.p.name + " silent since " + when(Date.now() - first.age)
+      : first.p.name + ": " + first.fails.map(function (f) { return f.label; }).join(", ");
+    if (bad.length > 1) t.textContent += " · +" + (bad.length - 1) + " other" + (bad.length > 2 ? "s" : "");
+    b.appendChild(t);
+    var go = document.createElement("span"); go.textContent = "›";
+    b.appendChild(go);
+    b.onclick = function () { showTab("srv"); };
+    alertsEl.appendChild(b);
   }
 
   fetchStatuses();

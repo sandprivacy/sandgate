@@ -27,6 +27,9 @@ export async function loadPage(
   Object.defineProperty(w, "crypto", { value: webcrypto });
   w.alert = (message: string) => alerts.push(String(message));
   w.confirm = () => true;
+  // jsdom has no layout: record scrolls instead of logging "not implemented".
+  w.scrolls = [] as unknown[];
+  w.scrollTo = (...args: unknown[]) => w.scrolls.push(args.length > 1 ? { top: args[1] } : args[0]);
   if (opts.localStorage) {
     for (const [key, value] of Object.entries(opts.localStorage)) {
       w.localStorage.setItem(key, value);

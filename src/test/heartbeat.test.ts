@@ -18,7 +18,7 @@ import {
   sendHeartbeat,
   sendGoodbye,
 } from "../ssh-guard-heartbeat.js";
-import { VERSION } from "../version.js";
+import { SERVER_VERSION, VERSION } from "../version.js";
 import { sshdUnreadableFinding } from "../ssh-guard-install.js";
 import { loadPage, waitFor } from "./helpers/page.js";
 
@@ -231,10 +231,60 @@ test("the app shows each server: online, addresses, versions, doctor's problems"
       assert.match(text, /online · just now/);
       assert.match(text, /203\.0\.113\.7 · Ubuntu 20\.04\.6 LTS · OpenSSH 8\.2p1/);
       assert.match(text, /sandgate 0\.9\.0 · blocking · key \+ phone/);
-      assert.match(text, new RegExp(`update available.*0\\.9\\.0 → ${VERSION.replace(/\./g, "\\.")}`));
+      // Against the last release that changed servers, not the relay's own.
+      assert.match(text, new RegExp(`update available.*0\\.9\\.0 → ${SERVER_VERSION.replace(/\./g, "\\.")}`));
       assert.match(text, /keyboard-interactive — ChallengeResponseAuthentication is no/);
       assert.ok(row.querySelector(".dot.up"));
       assert.ok(row.querySelector(".flag.fail"));
+    } finally {
+      close();
+    }
+  });
+});
+
+test("a server in trouble is first in the list, counted on the tab, and named on the Requests screen", async () => {
+  await withRelay(async (url) => {
+    const servers = [
+      { name: "alpha", findings: [] as any[], silent: false },
+      { name: "bravo", findings: [{ level: "fail", label: "keyboard-interactive", detail: "off" }], silent: false },
+      { name: "zulu", findings: [] as any[], silent: true },
+    ].map((s) => ({ ...s, ...newPairing() }));
+    for (const s of servers) {
+      const cfg = config(s.pairId, s.secret, url);
+      const st = collectStatus(cfg, s.findings, true);
+      // Sealed two hours ago: the page ages a heartbeat by its sealed time
+      // when it is older than the relay claims, which is how it reads here.
+      if (s.silent) st.ts = Date.now() - 2 * 3600_000;
+      await sendHeartbeat(cfg, st);
+    }
+    const { window, close } = await loadPage(url, {
+      localStorage: {
+        sandgate_pairs: JSON.stringify(servers.map((s) => ({ name: s.name, pairId: s.pairId, secret: s.secret }))),
+      },
+    });
+    try {
+      const doc = window.document;
+      await waitFor(() => doc.querySelectorAll(".srv").length === 3);
+      const names = [...doc.querySelectorAll(".srv .name")].map((n: any) => n.textContent);
+      assert.deepEqual(names, ["zulu", "bravo", "alpha"], "silent, then broken, then fine");
+      assert.match(doc.querySelector(".srv .seen").textContent, /^silent since /);
+      assert.match(doc.querySelector(".sum").textContent, /2 online.*1 silent.*1 with a problem/);
+      assert.equal(doc.getElementById("b-srv").textContent, "2", "the Servers tab counts what needs you");
+
+      // You land on Requests: the trouble is named there, one tap away.
+      assert.ok(doc.getElementById("v-req").classList.contains("on"));
+      const alert = doc.querySelector("#alerts .alert");
+      assert.match(alert.textContent, /zulu silent since .* \+1 other/);
+      alert.click();
+      assert.ok(doc.getElementById("v-srv").classList.contains("on"));
+      assert.ok(!doc.getElementById("v-req").classList.contains("on"));
+      assert.equal(doc.querySelector('[data-tab="srv"]').getAttribute("aria-selected"), "true");
+
+      // Details fold away; a tap opens them.
+      const row = doc.querySelectorAll(".srv")[1];
+      assert.ok(!row.classList.contains("open"));
+      row.click();
+      assert.ok(row.classList.contains("open"));
     } finally {
       close();
     }

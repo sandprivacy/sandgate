@@ -138,6 +138,48 @@ test("ask_human: denying returns no answer", async () => {
   }
 });
 
+test("a request arriving on another tab is counted, and the pill goes to it, at the top", async () => {
+  const relay = await startRelay({
+    port: 0,
+    stateDir: mkdtempSync(join(tmpdir(), "sandgate-relay-")),
+  });
+  const relayUrl = `http://localhost:${relay.port}`;
+  try {
+    const pairing = newPairing();
+    const { window, close } = await loadPage(relayUrl, {
+      hash: `#p=${pairing.pairId}&s=${pairing.secret}`,
+    });
+    try {
+      const doc = window.document;
+      assert.equal(doc.getElementById("tabs").hidden, false, "paired: the tab bar is there");
+      doc.querySelector('[data-tab="hist"]').click();
+      assert.ok(doc.getElementById("v-hist").classList.contains("on"));
+
+      const approver = new PwaApprover({ relayUrl, pairId: pairing.pairId, secret: pairing.secret });
+      const decision = approver.request({ title: "Deploy to prod", timeoutSec: 15 });
+      const pill = await waitFor(() => doc.querySelector(".jump"));
+      assert.match(pill.textContent, /1 request waiting/);
+      assert.equal(doc.getElementById("b-req").textContent, "1");
+      assert.ok(doc.getElementById("v-hist").classList.contains("on"), "never yanked away under your thumb");
+
+      window.scrolls.length = 0;
+      pill.click();
+      assert.ok(doc.getElementById("v-req").classList.contains("on"));
+      // The very top, title included: not scrolled to the card's buttons.
+      assert.ok(window.scrolls.length > 0);
+      assert.ok(window.scrolls.every((s: any) => s.top === 0), JSON.stringify(window.scrolls));
+
+      doc.querySelector(".card button.ok").click();
+      assert.equal((await decision).approved, true);
+      await waitFor(() => doc.getElementById("b-req").textContent === "");
+    } finally {
+      close();
+    }
+  } finally {
+    relay.close();
+  }
+});
+
 test("Deny works and corrupt stored pairings do not break the page", async () => {
   const relay = await startRelay({
     port: 0,

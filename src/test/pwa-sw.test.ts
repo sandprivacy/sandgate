@@ -25,9 +25,11 @@ interface Shown {
   options: any;
 }
 
-function bootWorker(store: unknown) {
+function bootWorker(store: unknown, env: { ua?: string; windows?: { visibilityState: string; focused: boolean }[] } = {}) {
   const handlers: Record<string, (e: any) => void> = {};
   const shown: Shown[] = [];
+  const closed: string[] = [];
+  const posted: unknown[] = [];
   const opened: string[] = [];
   const fetches: { url: string; body: any }[] = [];
   const context: any = {
@@ -38,9 +40,14 @@ function bootWorker(store: unknown) {
         showNotification: async (title: string, options: any) => {
           shown.push({ title, options });
         },
+        getNotifications: async (filter: any) =>
+          shown
+            .filter((n) => !filter?.tag || n.options.tag === filter.tag)
+            .map((n) => ({ close: () => closed.push(n.options.tag) })),
       },
       clients: {
-        matchAll: async () => [],
+        matchAll: async () =>
+          (env.windows ?? []).map((w) => ({ ...w, postMessage: (m: unknown) => posted.push(m) })),
         openWindow: async (url: string) => opened.push(url),
         claim: async () => {},
       },
@@ -50,6 +57,7 @@ function bootWorker(store: unknown) {
         match: async () => new Response(JSON.stringify(store)),
       }),
     },
+    navigator: { userAgent: env.ua ?? "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1" },
     crypto: webcrypto,
     TextEncoder,
     TextDecoder,
@@ -70,7 +78,7 @@ function bootWorker(store: unknown) {
     handlers[type]!({ ...event, waitUntil: (p: Promise<unknown>) => pending.push(p) });
     await Promise.all(pending);
   };
-  return { dispatch, shown, opened, fetches };
+  return { dispatch, shown, opened, fetches, closed, posted };
 }
 
 function sealedRequest(secret: string, requestId: string, extra: Record<string, unknown> = {}) {
@@ -181,4 +189,41 @@ test("details switched off, or an unknown vault, fall back to the generic notifi
   const legacy = bootWorker({ pairs: [], details: true });
   await legacy.dispatch("push", { data: { json: () => ({ type: "approval" }) } });
   assert.equal(legacy.shown[0]!.options.body, "Approval requested — tap to answer");
+});
+
+test("the app open in front: nothing rings, and Safari keeps its subscription", async () => {
+  const pairing = newPairing();
+  const requestId = "req_" + "d".repeat(12);
+  const store = { pairs: [{ name: "laptop", pairId: pairing.pairId, secret: pairing.secret }], details: true };
+  const push = { data: { json: () => ({ pairId: pairing.pairId, requestId, payload: sealedRequest(pairing.secret, requestId) }) } };
+  const visible = [{ visibilityState: "visible", focused: true }];
+
+  // Chromium waives the notification while a page of the site is visible:
+  // show nothing, just tell the page.
+  const chrome = bootWorker(store, {
+    ua: "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
+    windows: visible,
+  });
+  await chrome.dispatch("push", push);
+  assert.equal(chrome.shown.length, 0, "no notification over the open app");
+  assert.deepEqual(chrome.posted, ["refresh"], "the page still reads the request at once");
+
+  // Safari cancels the subscription after three pushes that show nothing:
+  // there it is shown, silent, and closed straight away.
+  const safari = bootWorker(store, { windows: visible });
+  await safari.dispatch("push", push);
+  assert.equal(safari.shown.length, 1, "Safari must see a notification for every push");
+  assert.equal(safari.shown[0]!.options.silent, true);
+  assert.deepEqual(safari.closed, ["sandgate-" + requestId], "and it is gone at once");
+
+  // In the background (or a window behind another), it rings as before.
+  for (const windows of [[], [{ visibilityState: "hidden", focused: false }], [{ visibilityState: "visible", focused: false }]]) {
+    for (const ua of [undefined, "Mozilla/5.0 (Linux; Android 14) Chrome/130.0.0.0 Mobile Safari/537.36"]) {
+      const w = bootWorker(store, { ua, windows });
+      await w.dispatch("push", push);
+      assert.equal(w.shown.length, 1);
+      assert.notEqual(w.shown[0]!.options.silent, true);
+      assert.equal(w.closed.length, 0);
+    }
+  }
 });

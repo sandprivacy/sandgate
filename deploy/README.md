@@ -56,7 +56,7 @@ sudo systemctl enable --now sandgate-relay
 
 ## Watching it
 
-- `GET /api/health` — `{ok, version}` for an uptime check. Public, so it says nothing about use.
+- `GET /api/health` — `{ok, version, server}` for an uptime check. Public, so it says nothing about use. `server` is the last release that changed what a server runs: the app offers servers an update against that, so a release that only touches the app or the relay does not ask every server to swap its binary.
 - `GET /api/metrics` — Prometheus text: requests, decisions, push sent/failed, claims issued/collected, rate-limited calls, active requests, pairings, uptime. Nothing per user. **Off unless you set a token**, and then only with it:
 
   ```bash
