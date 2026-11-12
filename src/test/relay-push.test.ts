@@ -42,7 +42,7 @@ async function withRelay(
 }
 
 const sub = (name: string) => ({
-  endpoint: `https://push.example/${name}`,
+  endpoint: `https://fcm.googleapis.com/fcm/send/${name}`,
   keys: { p256dh: "BP" + name, auth: "a" + name },
 });
 

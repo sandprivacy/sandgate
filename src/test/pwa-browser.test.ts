@@ -184,7 +184,7 @@ test("a vault added later is registered for push as well", async () => {
     const laptop = newPairing();
     const server = newPairing();
     const subscription = {
-      endpoint: "https://push.example/abc",
+      endpoint: "https://fcm.googleapis.com/fcm/send/abc",
       keys: { p256dh: "x", auth: "y" },
     };
 

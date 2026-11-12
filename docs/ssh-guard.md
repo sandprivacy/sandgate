@@ -188,7 +188,8 @@ relay reads nothing):
 The timer runs apart from the login path: a heartbeat that fails
 changes nothing about who can log in. `sandgate ssh-guard heartbeat`
 sends one by hand. `uninstall` removes the timer and tells the relay,
-so a server you removed is not reported as dead. Without systemd, run
+so a server you removed is not reported as dead; one that stays silent
+for 30 days is forgotten by the relay. Without systemd, run
 `sandgate ssh-guard heartbeat` from cron every five minutes.
 
 ## If you lose access anyway

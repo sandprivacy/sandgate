@@ -152,7 +152,7 @@ test("one stream and one read cover every vault of a device", async () => {
 test("removing a vault on a device stops that device ringing for it", async () => {
   await withRelay(async (url) => {
     const { pairId } = newPairing();
-    const sub = { endpoint: "https://push.example/phone", keys: { p256dh: "x", auth: "y" } };
+    const sub = { endpoint: "https://fcm.googleapis.com/fcm/send/phone", keys: { p256dh: "x", auth: "y" } };
     await post(url, "/api/subscribe", { pairId, subscription: sub });
     assert.equal((await (await fetch(`${url}/api/pair-status?pairId=${pairId}`)).json()).subscribed, true);
     await post(url, "/api/unsubscribe", { pairId, endpoint: sub.endpoint });

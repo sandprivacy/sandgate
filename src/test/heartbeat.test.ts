@@ -164,7 +164,7 @@ test("a quiet server rings the phone once, and again when it is back", async () 
     await fetch(`${url}/api/subscribe`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pairId, subscription: { endpoint: "https://push.example/p", keys: { p256dh: "x", auth: "y" } } }),
+      body: JSON.stringify({ pairId, subscription: { endpoint: "https://fcm.googleapis.com/fcm/send/p", keys: { p256dh: "x", auth: "y" } } }),
     });
     await sendHeartbeat(config(pairId, secret, url), collectStatus(config(pairId, secret, url), [], false));
     relay.checkQuiet(Date.now() + 60_000);
@@ -194,7 +194,7 @@ test("an uninstalled server is not reported as dead", async () => {
     await fetch(`${url}/api/subscribe`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pairId, subscription: { endpoint: "https://push.example/p", keys: { p256dh: "x", auth: "y" } } }),
+      body: JSON.stringify({ pairId, subscription: { endpoint: "https://fcm.googleapis.com/fcm/send/p", keys: { p256dh: "x", auth: "y" } } }),
     });
     const cfg = config(pairId, secret, url);
     await sendHeartbeat(cfg, collectStatus(cfg, [], false));

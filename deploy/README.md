@@ -1,6 +1,6 @@
 # Deploying a public relay (relay.sandgate.dev)
 
-The relay is stateless apart from `~/.sandgate/relay/relay-state.json` (VAPID keys + push subscriptions). It binds plain HTTP on localhost; TLS is terminated in front of it — phones require HTTPS for service workers and push.
+The relay is stateless apart from `~/.sandgate/relay/relay-state.json` (VAPID keys, push subscriptions, the last heartbeat of each server). It speaks plain HTTP, on every interface unless `SANDGATE_RELAY_HOST` says otherwise (`127.0.0.1` behind a proxy on the same host); TLS is terminated in front of it — phones require HTTPS for service workers and push. See "Locking the host down" below before going public.
 
 ## Option A — Cloudflare Tunnel (recommended when the domain is on Cloudflare)
 
@@ -66,13 +66,50 @@ sudo systemctl enable --now sandgate-relay
   ```
 
   Without the token, with a wrong one, or with none configured, the answer is the same 404. Wrong tokens count against the caller's per-address limit. A token shorter than 24 characters is refused at startup (metrics stay off, and the log says so). The header only: a token in a URL ends up in access logs. Before 0.9.1 these counters were public, which told anyone how much the relay was used and told an attacker whether their flood was being refused.
-- Rate limits: 12 requests/min and 5 undecided (unexpired) per pairing, against flooding a phone; 240 API calls/min per client address for pairings not in use, against invented pair ids. Calls about pairings in use are not counted there. `sandgate_relay_rate_limited_total` climbing fast means real clients are being refused — look at how the relay sees addresses.
+- Rate limits: 12 requests/min and 5 undecided (unexpired) per pairing, against flooding a phone; 240 API calls/min per client address for pairings not in use, against invented pair ids. Calls about pairings in use are not counted there. 60 new entries on disk per address and hour (a device subscribing to a vault it had not subscribed to, a server's first heartbeat), against filling the state file; at most 20,000 subscribed pairings and 5,000 servers. An IPv6 client counts per /64, the block one subscriber is given: per address, rotating the last bits walked around every limit. `sandgate_relay_rate_limited_total` climbing fast means real clients are being refused — look at how the relay sees addresses.
+- A server that has not sent a heartbeat for 30 days is forgotten (its phone stops showing it).
 - Client addresses:
   - From Cloudflare's published ranges (proxied DNS straight to the relay port): `CF-Connecting-IP`, which Cloudflare sets itself.
   - From a proxy on the host or the private network (nginx, Caddy, cloudflared): `X-Forwarded-For` **read from the right**, past the private addresses of your own proxies. A proxy appends what it saw after whatever the client wrote, so only the right end is trustworthy; before 0.9.1 the relay read the first entry, which any client could choose. If that hop is a Cloudflare address (nginx behind Cloudflare), `CF-Connecting-IP` names the client; reached directly, nginx's copy of that header is ignored.
   - Anything else connecting directly is taken at its own address; header values that are not addresses are ignored.
   - A TCP-level forwarder that rewrites no headers (socat, docker's userland proxy on loopback) makes every client look local, forged headers included. Publish the port normally (docker's default for outside traffic keeps the real address) or put an HTTP proxy in front.
   - Before 0.9.1, Cloudflare's edge was not recognised: every phone, gateway and server shared a few edge addresses and one limit.
+
+## Locking the host down
+
+The relay cannot read a request or forge a decision: everything that
+matters is sealed end to end. What it does hold is **the phone app
+itself** — the page and its worker, which hold the pairing secrets on the
+phone. Whoever can alter what the relay serves can steal them. So:
+
+- **TLS all the way to the relay.** Behind Cloudflare, the SSL/TLS mode
+  must be **Full (strict)** (with a Cloudflare origin certificate on the
+  host, e.g. Caddy or nginx), or the traffic must come through
+  `cloudflared`. In **Flexible** mode, Cloudflare reaches the relay over
+  plain HTTP across the internet, and anyone on that path can rewrite the
+  app as it goes by. Check it in the Cloudflare dashboard: SSL/TLS →
+  Overview.
+- **Close the plain-HTTP port to the world.** Only your proxy (or
+  Cloudflare) should reach it. With a proxy on the host, run the relay
+  with `SANDGATE_RELAY_HOST=127.0.0.1` (in Docker: publish
+  `-p 127.0.0.1:8787:8787`). With Cloudflare connecting straight to the
+  port, allow only Cloudflare's ranges (cloudflare.com/ips) to it in the
+  firewall. Note that Docker-published ports bypass `ufw`: filter them in
+  the `DOCKER-USER` iptables chain, or publish on 127.0.0.1.
+- **Keep `relay-state.json` mode 0600** (the relay writes it so) and out
+  of images and repositories: it holds the VAPID private key.
+
+What the relay already refuses on its own:
+
+- Pushes go only to the browsers' push services (Google FCM, Apple,
+  Mozilla, Microsoft WNS). A push subscription is a URL the client hands
+  over and the relay then POSTs to; before 0.9.1 any https URL was
+  accepted, so a stranger could make the relay knock on a service inside
+  its own network. A self-hosted push service is added with
+  `SANDGATE_PUSH_HOSTS=push.example.org` (comma-separated).
+- The page cannot be framed by another site (`frame-ancestors 'none'`,
+  `X-Frame-Options: DENY`), types are not sniffed, and no referrer
+  leaves.
 
 ## Upgrading
 

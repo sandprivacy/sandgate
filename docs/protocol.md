@@ -192,6 +192,14 @@ themselves end-to-end encrypted, so no push service sees it:
 { "type": "server", "pairId": "…", "state": "offline" | "online", "since": 1700000000000 }
 ```
 
+The relay accepts a subscription only if its endpoint is `https` on the
+default port at a browser push service (`fcm.googleapis.com`,
+`*.push.apple.com`, `*.push.services.mozilla.com`, `*.notify.windows.com`,
+plus what the operator lists in `SANDGATE_PUSH_HOSTS`), with `keys.p256dh`
+and `keys.auth` as strings; it keeps those three fields and nothing else.
+Anything else is a 400: the relay POSTs to that URL, and must not be
+pointed at its own network.
+
 Every device that subscribed to a pairing is pushed to (a pairing kept
 one subscription before 0.9.1, so a second device silently took the
 pushes from the first). Pushes go out with `Urgency: high`, and with a
@@ -236,9 +244,12 @@ relay's clock, unless the sealed `ts` is more than ten minutes older
 than `receivedAt` — an old heartbeat replayed does not pass for a live
 server. The SSE stream also carries a `status` event.
 
+A status not refreshed for 30 days is forgotten.
+
 Rate limits: 12 requests/minute and 5 undecided per pairing; 240 API
-calls/minute per client address. A client that polls sensibly never
-meets them.
+calls/minute per client address for pairings not in use; 60 new
+subscribed pairings or first heartbeats per address and hour. IPv6
+addresses count per /64. A client that polls sensibly never meets them.
 
 ## 7. What a client must never do
 

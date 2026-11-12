@@ -123,6 +123,18 @@ const MAX_PER_IP = 240;
 const MAX_KNOWN_PER_IP = 3000;
 /** Pairings one batched call (pending, events, status) may cover. */
 const MAX_BATCH = 64;
+/**
+ * New entries the relay stores on disk for someone (a device subscribing
+ * to a vault it was not subscribed to, a server's first heartbeat), per
+ * address and hour. A phone pairing a dozen servers is far below it; a
+ * script inventing pair ids to fill the state file is not.
+ */
+const NEW_WINDOW_MS = 60 * 60 * 1000;
+const MAX_NEW_PER_HOUR = 60;
+/** Pairings with push subscriptions kept at most, like MAX_STATUSES. */
+const MAX_SUBSCRIBED = 20000;
+/** A server silent this long is forgotten: its status was a month old. */
+const STATUS_FORGET_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * Cloudflare's published ranges (cloudflare.com/ips). A connection from
@@ -219,11 +231,85 @@ export function clientAddress(peer: string, headers: IncomingMessage["headers"])
 }
 
 /**
+ * The bucket a client's calls are counted in. An IPv6 subscriber is
+ * handed a whole /64 — 2^64 addresses — so counting per address let one
+ * client step around every limit by changing its last bits. IPv6 counts
+ * per /64, IPv4 per address.
+ */
+export function rateKey(addr: string): string {
+  const ip = ipToBigInt(addr);
+  if (!ip) return addr;
+  if (!ip.v6) return addr.replace(/^::ffff:/i, "");
+  return `${(ip.n >> 64n).toString(16).padStart(16, "0")}::/64`;
+}
+
+/**
+ * Where the relay may send a push: the browsers' push services, nothing
+ * else. A subscription is just a URL the client hands over, and the relay
+ * POSTs to it — without this, anyone could point it at an address inside
+ * the relay's own network (an admin port, a cloud metadata service) and
+ * have the relay knock on it every time a request arrives.
+ * SANDGATE_PUSH_HOSTS adds hosts (comma-separated) for a self-hosted push
+ * service.
+ */
+const PUSH_SERVICES = [
+  "fcm.googleapis.com", // Chrome, Android, Edge on Android, Samsung, Opera, Brave
+  "android.googleapis.com", // older Chrome
+  "push.services.mozilla.com", // Firefox
+  "push.apple.com", // Safari, iOS and macOS (web.push.apple.com)
+  "notify.windows.com", // Edge on Windows (*.notify.windows.com)
+];
+export function pushEndpointAllowed(endpoint: unknown, extraHosts: string[] = []): boolean {
+  if (typeof endpoint !== "string" || endpoint.length > 2048) return false;
+  let u: URL;
+  try {
+    u = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  // https on its default port, no credentials, a name (not an address).
+  if (u.protocol !== "https:" || u.port !== "" || u.username || u.password) return false;
+  const host = u.hostname.toLowerCase();
+  return [...PUSH_SERVICES, ...extraHosts].some((s) => host === s || host.endsWith("." + s));
+}
+const extraPushHosts = (): string[] =>
+  (process.env.SANDGATE_PUSH_HOSTS ?? "")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+
+/** A subscription as a browser hands it over, and nothing bigger. */
+const validSubscription = (sub: any): sub is webpush.PushSubscription =>
+  !!sub &&
+  typeof sub === "object" &&
+  typeof sub.keys?.p256dh === "string" &&
+  typeof sub.keys?.auth === "string" &&
+  sub.keys.p256dh.length > 0 &&
+  sub.keys.p256dh.length <= 256 &&
+  sub.keys.auth.length > 0 &&
+  sub.keys.auth.length <= 256;
+
+/**
+ * Headers on everything the relay serves. The approval page must never be
+ * framed by another site (a page laid over it could steer a tap onto
+ * Approve); nothing is to be sniffed into another type; no address leaks
+ * to a link's target.
+ */
+const BASE_HEADERS = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Content-Security-Policy": "frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
+  "Referrer-Policy": "no-referrer",
+};
+
+/**
  * The operator's metrics token, if any. Too short to resist guessing
  * means no metrics at all rather than weak ones.
  */
 const MIN_METRICS_TOKEN = 24;
-function metricsTokenDigest(token: string | undefined): Buffer | null {
+function metricsTokenDigest(raw: string | undefined): Buffer | null {
+  // A token read from a file or a compose list often carries a newline.
+  const token = raw?.trim();
   if (!token) return null;
   if (token.length < MIN_METRICS_TOKEN) {
     console.error(
@@ -255,7 +341,15 @@ export async function startRelay(opts: {
   claimTtlMs?: number;
   /** Bearer token for /api/metrics; defaults to SANDGATE_METRICS_TOKEN. Unset: no metrics. */
   metricsToken?: string;
-}): Promise<{ close: () => void; port: number; checkQuiet: (now?: number) => void; metricsEnabled: boolean }> {
+  /** Address to listen on; defaults to SANDGATE_RELAY_HOST, else every interface. */
+  host?: string;
+}): Promise<{
+  close: () => void;
+  port: number;
+  checkQuiet: (now?: number) => void;
+  sweep: (now?: number) => void;
+  metricsEnabled: boolean;
+}> {
   const claimTtl = opts.claimTtlMs ?? CLAIM_TTL_MS;
   const metricsDigest = metricsTokenDigest(opts.metricsToken ?? process.env.SANDGATE_METRICS_TOKEN);
   /** Constant time, and on digests so the token's length leaks nothing either. */
@@ -304,11 +398,13 @@ export async function startRelay(opts: {
 
   const ipHits = new Map<string, number[]>();
   const knownHits = new Map<string, number[]>();
+  const newHits = new Map<string, number[]>();
+  const pushHosts = extraPushHosts();
   const clientIp = (req: IncomingMessage): string =>
-    clientAddress(req.socket.remoteAddress ?? "?", req.headers);
-  const hit = (table: Map<string, number[]>, ip: string, max: number): boolean => {
+    rateKey(clientAddress(req.socket.remoteAddress ?? "?", req.headers));
+  const hit = (table: Map<string, number[]>, ip: string, max: number, windowMs = IP_WINDOW_MS): boolean => {
     const now = Date.now();
-    const hits = (table.get(ip) ?? []).filter((t) => now - t < IP_WINDOW_MS);
+    const hits = (table.get(ip) ?? []).filter((t) => now - t < windowMs);
     if (hits.length >= max) {
       table.set(ip, hits);
       metrics.rateLimited++;
@@ -319,6 +415,9 @@ export async function startRelay(opts: {
     return false;
   };
   const ipLimited = (req: IncomingMessage): boolean => hit(ipHits, clientIp(req), MAX_PER_IP);
+  /** One more entry stored on disk for this address (see MAX_NEW_PER_HOUR). */
+  const newLimited = (req: IncomingMessage): boolean =>
+    hit(newHits, clientIp(req), MAX_NEW_PER_HOUR, NEW_WINDOW_MS);
   /**
    * Is this a pairing someone actually uses? Traffic for those is not what
    * the per-address limit is for (invented pair ids), and counting it
@@ -352,6 +451,8 @@ export async function startRelay(opts: {
   const pushAll = (pairId: string, message: string, ttl: number) => {
     const pairing = getPairing(pairId);
     for (const sub of [...pairing.subscriptions]) {
+      // State written by an older relay was never checked.
+      if (!pushEndpointAllowed(sub.endpoint, pushHosts)) continue;
       webpush
         // urgency high: someone is waiting on the other end. At the
         // default "normal", Apple delivers at low priority and an
@@ -404,10 +505,10 @@ export async function startRelay(opts: {
     }
   };
 
-  const gc = setInterval(() => {
-    const cutoff = Date.now() - REQUEST_TTL_MS;
-    const claimCutoff = Date.now() - claimTtl;
-    const now = Date.now();
+  /** Housekeeping, every minute; `now` is for tests. */
+  const sweep = (now = Date.now()) => {
+    const cutoff = now - REQUEST_TTL_MS;
+    const claimCutoff = now - claimTtl;
     for (const p of pairings.values()) {
       for (const [id, entry] of p.requests) {
         // Two minutes past its expiry: room for a gateway's last long-poll.
@@ -417,23 +518,39 @@ export async function startRelay(opts: {
     }
     // A pairing nobody uses is just a map entry that an attacker with a
     // random-id generator can multiply. Forget the empty, idle ones.
-    const idleCutoff = Date.now() - 60 * 60 * 1000;
+    const idleCutoff = now - 60 * 60 * 1000;
     for (const [id, p] of pairings) {
       const empty =
         !p.subscriptions.length && !p.status && !p.claim && p.requests.size === 0 && p.listeners.size === 0;
       const idle = !p.lastSeen || p.lastSeen < idleCutoff;
       if (empty && idle && !(p.claimedAt && p.claimedAt > idleCutoff)) pairings.delete(id);
     }
-    checkQuiet();
-    const ipCutoff = Date.now() - IP_WINDOW_MS;
-    for (const table of [ipHits, knownHits]) {
+    // A server silent for a month is not news any more, and a status an
+    // invented id posted once must not sit on disk forever.
+    let forgot = false;
+    for (const [id, st] of Object.entries(state.statuses ?? {})) {
+      if (now - st.receivedAt < STATUS_FORGET_MS) continue;
+      delete state.statuses![id];
+      const p = pairings.get(id);
+      if (p) p.status = undefined;
+      forgot = true;
+    }
+    if (forgot) persist();
+    checkQuiet(now);
+    for (const [table, windowMs] of [
+      [ipHits, IP_WINDOW_MS],
+      [knownHits, IP_WINDOW_MS],
+      [newHits, NEW_WINDOW_MS],
+    ] as const) {
+      const since = now - windowMs;
       for (const [ip, hits] of table) {
-        const live = hits.filter((t) => t > ipCutoff);
+        const live = hits.filter((t) => t > since);
         if (live.length) table.set(ip, live);
         else table.delete(ip);
       }
     }
-  }, Math.min(60_000, claimTtl));
+  };
+  const gc = setInterval(() => sweep(), Math.min(60_000, claimTtl));
   gc.unref();
 
   function json(res: ServerResponse, status: number, body: unknown): void {
@@ -481,6 +598,7 @@ export async function startRelay(opts: {
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
+    for (const [name, value] of Object.entries(BASE_HEADERS)) res.setHeader(name, value);
     try {
       // --- static PWA ---
       // no-cache: a fix to the page or the worker must reach the phone on
@@ -602,11 +720,25 @@ export async function startRelay(opts: {
 
       if (req.method === "POST" && url.pathname === "/api/subscribe") {
         const body = await readBody(req);
-        if (!validId(body.pairId) || !body.subscription?.endpoint) {
+        if (!validId(body.pairId) || !validSubscription(body.subscription)) {
           return json(res, 400, { error: "pairId and subscription required" });
         }
+        if (!pushEndpointAllowed(body.subscription.endpoint, pushHosts)) {
+          return json(res, 400, { error: "That endpoint is not a browser push service." });
+        }
+        // Only what a push needs is stored: no extra fields to fill the file with.
+        const sub: webpush.PushSubscription = {
+          endpoint: body.subscription.endpoint,
+          keys: { p256dh: body.subscription.keys.p256dh, auth: body.subscription.keys.auth },
+        };
+        const isNew = !state.subscriptions[body.pairId];
+        if (isNew && Object.keys(state.subscriptions).length >= MAX_SUBSCRIBED) {
+          return json(res, 503, { error: "Relay is not accepting new devices right now." });
+        }
+        if (isNew && newLimited(req)) {
+          return json(res, 429, { error: "Too many new vaults from this address. Try again later.", retryable: true });
+        }
         const pairing = getPairing(body.pairId);
-        const sub = body.subscription as webpush.PushSubscription;
         // Same endpoint = same device: replace it (its keys may have
         // rotated), and keep it last as the most recently seen.
         pairing.subscriptions = pairing.subscriptions.filter((s) => s.endpoint !== sub.endpoint);
@@ -767,6 +899,9 @@ export async function startRelay(opts: {
         }
         if (!prev && Object.keys(statuses).length >= MAX_STATUSES) {
           return json(res, 503, { error: "Relay is not accepting new servers right now." });
+        }
+        if (!prev && newLimited(req)) {
+          return json(res, 429, { error: "Too many new servers from this address. Try again later." });
         }
         const intervalSec = Math.min(3600, Math.max(60, parseInt(String(body.intervalSec ?? 300), 10) || 300));
         pairing.status = { payload: body.payload, receivedAt: now, intervalSec };
@@ -929,8 +1064,18 @@ export async function startRelay(opts: {
     }
   });
 
-  await new Promise<void>((resolve) => server.listen(opts.port, resolve));
+  // All interfaces unless told otherwise (a container needs that); behind
+  // a proxy on the same host, SANDGATE_RELAY_HOST=127.0.0.1 keeps the
+  // plain-HTTP port off the network.
+  const host = opts.host ?? (process.env.SANDGATE_RELAY_HOST || undefined);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(opts.port, host, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : opts.port;
-  return { close: () => server.close(), port, checkQuiet, metricsEnabled: metricsDigest !== null };
+  return { close: () => server.close(), port, checkQuiet, sweep, metricsEnabled: metricsDigest !== null };
 }

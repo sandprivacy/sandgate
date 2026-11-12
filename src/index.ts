@@ -513,7 +513,7 @@ async function cmdRelay(portArg?: string): Promise<void> {
     stateDir: join(sandgateDir(), "relay"),
   });
   console.log(
-    `sandgate relay listening on http://localhost:${relay.port}\n` +
+    `sandgate relay listening on ${process.env.SANDGATE_RELAY_HOST || "every interface"}, port ${relay.port} (plain HTTP)\n` +
       `Behind TLS (required for phone push), pair with: sandgate pair https://your-relay-host\n` +
       (relay.metricsEnabled
         ? "Metrics: /api/metrics, with Authorization: Bearer <SANDGATE_METRICS_TOKEN>"
