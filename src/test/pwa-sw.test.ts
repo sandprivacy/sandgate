@@ -47,7 +47,7 @@ function bootWorker(store: unknown, env: { ua?: string; windows?: { visibilitySt
       },
       clients: {
         matchAll: async () =>
-          (env.windows ?? []).map((w) => ({ ...w, postMessage: (m: unknown) => posted.push(m) })),
+          (env.windows ?? []).map((w) => ({ ...w, postMessage: (m: unknown) => posted.push(m), focus: async () => {} })),
         openWindow: async (url: string) => opened.push(url),
         claim: async () => {},
       },
@@ -226,4 +226,21 @@ test("the app open in front: nothing rings, and Safari keeps its subscription", 
       assert.equal(w.closed.length, 0);
     }
   }
+});
+
+test("a tapped server alert opens the app on the servers", async () => {
+  const pairing = newPairing();
+  const store = { pairs: [{ name: "us4", pairId: pairing.pairId, secret: pairing.secret }], details: true };
+  const alert = { data: { json: () => ({ type: "server", pairId: pairing.pairId, state: "offline", since: Date.now() }) } };
+
+  const closedApp = bootWorker(store);
+  await closedApp.dispatch("push", alert);
+  assert.equal(closedApp.shown[0]!.options.data.type, "server");
+  await closedApp.dispatch("notificationclick", { action: "", notification: { close() {}, data: closedApp.shown[0]!.options.data } });
+  assert.deepEqual(closedApp.opened, ["/#servers"]);
+
+  const asleep = bootWorker(store, { windows: [{ visibilityState: "hidden", focused: false }] });
+  await asleep.dispatch("push", alert);
+  await asleep.dispatch("notificationclick", { action: "", notification: { close() {}, data: asleep.shown[0]!.options.data } });
+  assert.deepEqual(asleep.posted, ["refresh", "servers"], "the open app is told where to go");
 });

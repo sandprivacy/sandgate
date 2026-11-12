@@ -19,6 +19,7 @@ import {
   sendGoodbye,
 } from "../ssh-guard-heartbeat.js";
 import { SERVER_VERSION, VERSION } from "../version.js";
+import { PwaApprover } from "../pwa-approver.js";
 import { sshdUnreadableFinding } from "../ssh-guard-install.js";
 import { loadPage, waitFor } from "./helpers/page.js";
 
@@ -285,6 +286,51 @@ test("a server in trouble is first in the list, counted on the tab, and named on
       assert.ok(!row.classList.contains("open"));
       row.click();
       assert.ok(row.classList.contains("open"));
+    } finally {
+      close();
+    }
+  });
+});
+
+test("an SSH login says what silence does on that server; a server alert opens on the servers", async () => {
+  await withRelay(async (url) => {
+    const notify = { name: "watch", ...newPairing() };
+    const enforce = { name: "gate", ...newPairing() };
+    for (const [s, failOpen] of [[notify, true], [enforce, false]] as const) {
+      const cfg = { ...config(s.pairId, s.secret, url), serverName: s.name, failOpen };
+      await sendHeartbeat(cfg, collectStatus(cfg, [], true));
+    }
+    const { window, close } = await loadPage(url, {
+      hash: "#servers", // what a tapped "stopped responding" opens
+      localStorage: {
+        sandgate_pairs: JSON.stringify([notify, enforce].map((s) => ({ name: s.name, pairId: s.pairId, secret: s.secret }))),
+      },
+    });
+    try {
+      const doc = window.document;
+      await waitFor(() => doc.getElementById("v-srv").classList.contains("on"));
+      assert.equal(window.location.hash, "", "the link is consumed");
+      await waitFor(() => doc.querySelectorAll(".srv").length === 2);
+
+      const ask = (s: typeof notify, title: string) =>
+        new PwaApprover({ relayUrl: url, pairId: s.pairId, secret: s.secret }).request({ title, timeoutSec: 30 });
+      const answers = [
+        ask(notify, "SSH login: root@watch"),
+        ask(enforce, "SSH login: root@gate"),
+        ask(enforce, "Deploy to prod"),
+      ];
+      await waitFor(() => doc.querySelectorAll(".card").length === 3);
+      const card = (title: string) =>
+        [...doc.querySelectorAll(".card")].find((c: any) => c.querySelector("h2").textContent === title) as any;
+      // Notify mode: silence lets the login in, and the card must say so.
+      await waitFor(() => /then let in/.test(card("SSH login: root@watch").querySelector(".left").textContent));
+      assert.equal(card("SSH login: root@watch").querySelector(".who").textContent, "watch · ssh login");
+      assert.match(card("SSH login: root@gate").querySelector(".left").textContent, /then denied/);
+      assert.match(card("Deploy to prod").querySelector(".left").textContent, /then denied/);
+      assert.equal(card("Deploy to prod").querySelector(".who").textContent, "gate · agent · approval request");
+
+      for (const c of [...doc.querySelectorAll(".card button.no")] as any[]) c.click();
+      for (const a of answers) assert.equal((await a).approved, false);
     } finally {
       close();
     }

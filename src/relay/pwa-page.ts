@@ -172,7 +172,7 @@ function describeServerPush(data, store) {
       renotify: true,
       icon: "/icon-192.png",
       badge: "/icon-192.png",
-      data: {},
+      data: { type: "server" },
     },
   };
 }
@@ -258,15 +258,17 @@ self.addEventListener("notificationclick", function (e) {
     e.waitUntil(answerFromNotification(d, e.action === "approve"));
     return;
   }
+  // A server alert opens on the servers, anything else on the requests.
+  var servers = d.type === "server";
   e.waitUntil((async function () {
     var clientList = await self.clients.matchAll({ type: "window" });
     if (clientList.length) {
       // The page was asleep: tell it to read the requests now, not when
       // its next poll comes round.
-      clientList[0].postMessage("open");
+      clientList[0].postMessage(servers ? "servers" : "open");
       return clientList[0].focus();
     }
-    return self.clients.openWindow("/");
+    return self.clients.openWindow(servers ? "/#servers" : "/");
   })());
 });
 `;
@@ -342,7 +344,6 @@ export const PWA_HTML = `<!doctype html>
   }
   .title { flex: 1; }
   .title h1 { font-size: 17px; margin: 0; letter-spacing: .01em; }
-  .title .sub { font-size: 11.5px; color: var(--soft); letter-spacing: .06em; text-transform: uppercase; }
   .pill {
     display: flex; align-items: center; gap: 6px;
     font-size: 11px; font-weight: 600; letter-spacing: .04em;
@@ -368,6 +369,7 @@ export const PWA_HTML = `<!doctype html>
     border-top: 1px solid var(--line);
   }
   .tabs[hidden] { display: none; }
+  body.typing .tabs, body.typing .jump { display: none; }
   .tabs button {
     position: relative; flex: 1; max-width: 130px;
     display: flex; flex-direction: column; align-items: center; gap: 2px;
@@ -414,7 +416,6 @@ export const PWA_HTML = `<!doctype html>
     border-radius: 14px;
     padding: 16px 16px 14px;
     margin-bottom: 14px;
-    scroll-margin-top: calc(env(safe-area-inset-top, 0px) + 72px);
     animation: rise .25s ease-out;
   }
   @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
@@ -558,11 +559,11 @@ export const PWA_HTML = `<!doctype html>
   <section class="view" id="v-hist"><div id="hist"></div></section>
   <section class="view" id="v-set"><div id="vaults"></div></section>
 </main>
-<nav class="tabs" id="tabs" hidden>
-  <button data-tab="req" aria-selected="true">${TAB_ICONS.req}<span>Requests</span><i class="badge" id="b-req"></i></button>
-  <button data-tab="srv" aria-selected="false">${TAB_ICONS.srv}<span>Servers</span><i class="badge red" id="b-srv"></i></button>
-  <button data-tab="hist" aria-selected="false">${TAB_ICONS.hist}<span>History</span></button>
-  <button data-tab="set" aria-selected="false">${TAB_ICONS.set}<span>Settings</span></button>
+<nav class="tabs" id="tabs" role="tablist" hidden>
+  <button role="tab" data-tab="req" aria-selected="true">${TAB_ICONS.req}<span>Requests</span><i class="badge" id="b-req"></i></button>
+  <button role="tab" data-tab="srv" aria-selected="false">${TAB_ICONS.srv}<span>Servers</span><i class="badge red" id="b-srv"></i></button>
+  <button role="tab" data-tab="hist" aria-selected="false">${TAB_ICONS.hist}<span>History</span></button>
+  <button role="tab" data-tab="set" aria-selected="false">${TAB_ICONS.set}<span>Settings</span></button>
 </nav>
 <script>
 (function () {
@@ -888,6 +889,28 @@ export const PWA_HTML = `<!doctype html>
     var el = document.getElementById(id);
     el.textContent = n > 0 ? String(n) : "";
   }
+  // A tapped "server stopped responding" lands on the servers. Coming back
+  // to the app normally goes to a waiting request: not this time.
+  var serversAskedAt = 0;
+  function openServers() {
+    serversAskedAt = Date.now();
+    scrollToCards = false;
+    showTab("srv");
+    fetchStatuses();
+  }
+  if (location.hash === "#servers") {
+    history.replaceState(null, "", location.pathname);
+    serversAskedAt = Date.now();
+    currentTab = "srv";
+    setTimeout(function () { showTab("srv"); }, 0);
+  }
+  // On a phone the keyboard comes up under a fixed tab bar, which then
+  // sits over the answer field and its Send button: out of the way while
+  // typing.
+  document.addEventListener("focusin", function (e) {
+    if (e.target && e.target.tagName === "INPUT") document.body.classList.add("typing");
+  });
+  document.addEventListener("focusout", function () { document.body.classList.remove("typing"); });
 
   // The app on screen is the notification: clear what the lock screen
   // still shows, it is all here (and some of it already answered).
@@ -1013,8 +1036,10 @@ export const PWA_HTML = `<!doctype html>
           // From a tapped notification: go straight to the card it was about.
           // A push read in the background: refresh; the pill shows if the
           // card lands off-screen — no jumping under your thumb.
-          if (e.data === "refresh") fetchPending();
+          // A push the page read instead of ringing may be a server alert.
+          if (e.data === "refresh") { fetchPending(); fetchStatuses(); }
           if (e.data === "open") { scrollToCards = true; fetchPending(); }
+          if (e.data === "servers") openServers();
         });
         return reg;
       })
@@ -1286,10 +1311,11 @@ export const PWA_HTML = `<!doctype html>
   window.addEventListener("scroll", function () { updateJumpPill(); }, { passive: true });
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) return;
-    scrollToCards = true;
+    if (Date.now() - serversAskedAt > 3000) scrollToCards = true;
     clearNotifications();
+    renderHist(); // "Today" may have become "Yesterday" while away
   });
-  clearNotifications();
+  if (!document.hidden) clearNotifications();
 
   // Push, SSE and the safety poll all trigger refreshes, and they arrive
   // together. Two of them used to race in the gap between "do I have this
@@ -1383,6 +1409,9 @@ export const PWA_HTML = `<!doctype html>
   function addCard(id, p, requestId, req) {
     var isInput = req.kind === "input";
     var isEnroll = req.kind === "enroll";
+    // ssh-guard's requests: "SSH login: user@server". Said as such, not
+    // as an agent asking.
+    var isSsh = !isInput && !isEnroll && /^SSH login: /.test(String(req.title || ""));
     var card = document.createElement("div");
     card.className = "card";
 
@@ -1391,7 +1420,9 @@ export const PWA_HTML = `<!doctype html>
       (pairs.length > 1 ? p.name + " · " : "") +
       (isEnroll
         ? "sandgate · setup"
-        : isInput
+        : isSsh
+          ? (req.requireBiometric ? "ssh login · Face ID" : "ssh login")
+          : isInput
           ? "agent · question"
           : req.requireBiometric
             ? "agent · approval · Face ID"
@@ -1481,10 +1512,20 @@ export const PWA_HTML = `<!doctype html>
 
     ensureEmpty(false);
     listEl.appendChild(card);
-    cards[id] = { el: card, leftEl: left, fillEl: fill, barEl: bar, rowEl: row, inputEl: input, req: req, pair: p, requestId: requestId, done: false };
+    cards[id] = { el: card, leftEl: left, fillEl: fill, barEl: bar, rowEl: row, inputEl: input, req: req, pair: p, requestId: requestId, isSsh: isSsh, done: false };
     tickOne(cards[id]);
   }
 
+  // What silence does. An agent's request is refused; an SSH login on a
+  // server in notify mode is LET IN, and the card used to say "denied"
+  // there. Its mode comes from the server's heartbeat; without one, the
+  // card does not guess.
+  function silenceOutcome(c) {
+    if (!c.isSsh) return "denied";
+    var s = statuses[c.pair.pairId];
+    if (!s || !s.st) return null;
+    return s.st.mode === "notify" ? "let in" : "denied";
+  }
   function tickOne(c) {
     var total = c.req.timeoutSec * 1000;
     var remaining = Math.max(0, c.req.ts + total - Date.now());
@@ -1494,13 +1535,15 @@ export const PWA_HTML = `<!doctype html>
         c.el.classList.add("expired");
         c.rowEl.remove();
         if (c.inputEl) c.inputEl.disabled = true;
-        c.leftEl.textContent = "expired — denied";
+        var after = silenceOutcome(c);
+        c.leftEl.textContent = "expired" + (after ? " — " + after : "");
         c.fillEl.style.width = "0%";
         recordHist(histLabel(c), "expired", c.req.body);
       }
       return;
     }
-    c.leftEl.textContent = Math.ceil(remaining / 1000) + "s — then denied";
+    var then = silenceOutcome(c);
+    c.leftEl.textContent = Math.ceil(remaining / 1000) + "s" + (then ? " — then " + then : " left");
     c.fillEl.style.width = Math.min(100, (remaining / total) * 100) + "%";
     c.barEl.className = "bar" + (remaining < total * 0.25 ? " low" : "");
   }
@@ -1667,8 +1710,15 @@ export const PWA_HTML = `<!doctype html>
     var pushRow = document.createElement("div"); pushRow.className = "hrow";
     var pushLabel = document.createElement("span"); pushLabel.className = "t";
     pushLabel.textContent = "Push on this device";
-    var pushState = document.createElement("span"); pushState.className = "d " + (pushOn ? "approved" : "expired");
-    pushState.textContent = pushOn ? "on" : "off";
+    var blocked = "Notification" in window && Notification.permission === "denied";
+    var canAsk = !pushOn && !blocked && "Notification" in window && "PushManager" in window && !(isIOS && !standalone);
+    var pushState = document.createElement("span");
+    pushState.className = "d " + (pushOn ? "approved" : canAsk ? "approved" : "expired");
+    pushState.textContent = pushOn ? "on" : blocked ? "blocked in settings" : canAsk ? "turn on" : "off";
+    if (canAsk) {
+      pushState.style.cursor = "pointer";
+      pushState.onclick = function () { enablePush().catch(showPushError); };
+    }
     pushRow.appendChild(pushLabel); pushRow.appendChild(pushState);
     section.appendChild(pushRow);
     var ver = document.createElement("p"); ver.className = "note";

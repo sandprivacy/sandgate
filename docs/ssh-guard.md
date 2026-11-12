@@ -175,9 +175,12 @@ server's state, sealed with the pairing key like everything else (the
 relay reads nothing):
 
 - online, or **silent since 14:05**: a server that misses three beats
-  rings your phone once, and again when it is back;
+  rings your phone once, and again when it is back; tapping that alert
+  opens the app on the server, and a silent or failing server is also
+  named at the top of the Requests screen;
 - its addresses, OS, OpenSSH version and sandgate version, with
-  "update available" when the relay runs a newer release;
+  "update available" when a newer release changed what servers run (a
+  release that only touches the app does not ask you to upgrade);
 - notify or blocking, key + phone or password + phone;
 - **`doctor`'s problems, in red**: a server whose wiring breaks (an
   `openssh-server` upgrade that replaced `/etc/pam.d/sshd`, a
