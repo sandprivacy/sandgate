@@ -200,3 +200,47 @@ test("the approval page cannot be framed by another site", async () => {
     }
   });
 });
+
+// --- many pairings on one phone ---------------------------------------------
+
+test("a phone with hundreds of pairings is served: lists up to 512, refused above", async () => {
+  await withRelay(async (url) => {
+    const ids = (n: number) => Array.from({ length: n }, () => newPairing().pairId);
+    for (const path of ["/api/pending", "/api/status"]) {
+      // 65 is what broke a real phone: the relay said "bad pairId" to all.
+      for (const n of [65, 512]) {
+        const list = ids(n);
+        const res = await fetch(`${url}${path}?pairIds=${list.join(",")}`);
+        assert.equal(res.status, 200, `${path} with ${n}`);
+        const body = await res.json();
+        assert.equal(Object.keys(body.byPair).length, n);
+      }
+      assert.equal((await fetch(`${url}${path}?pairIds=${ids(513).join(",")}`)).status, 400);
+    }
+  });
+});
+
+test("one subscribe and one hello cover a list of vaults, under the same caps", async () => {
+  await withRelay(async (url, _relay, dir) => {
+    const list = Array.from({ length: 70 }, () => newPairing().pairId);
+    const res = await post(url, "/api/subscribe", { pairIds: list, subscription: sub("https://fcm.googleapis.com/fcm/send/many") });
+    assert.equal(res.status, 200);
+    // 60 new vaults per address and hour, a list included.
+    assert.deepEqual(await res.json(), { ok: true, refused: 10 });
+    const saved = JSON.parse(readFileSync(join(dir, "relay-state.json"), "utf8"));
+    assert.equal(Object.keys(saved.subscriptions).length, 60);
+    // Already subscribed: never counted again (every app load sends them).
+    const again = await post(url, "/api/subscribe", { pairIds: list.slice(0, 60), subscription: sub("https://fcm.googleapis.com/fcm/send/many") });
+    assert.deepEqual(await again.json(), { ok: true, refused: 0 });
+
+    // hello marks pairings the relay holds; invented ones create nothing.
+    const stranger = newPairing().pairId;
+    assert.equal((await post(url, "/api/hello", { pairIds: [list[0], stranger] })).status, 200);
+    const status = async (id: string) => (await (await fetch(`${url}/api/pair-status?pairId=${id}`)).json()).seen;
+    assert.equal(await status(list[0]!), true);
+
+    for (const bad of [[], ["x"], Array.from({ length: 513 }, () => newPairing().pairId), "notalist"]) {
+      assert.equal((await post(url, "/api/hello", { pairIds: bad })).status, 400, JSON.stringify(bad).slice(0, 40));
+    }
+  });
+});

@@ -144,7 +144,7 @@ test("one stream and one read cover every vault of a device", async () => {
     const both = await (await fetch(`${url}/api/pending?pairIds=${a.pairId},${b.pairId}`)).json();
     assert.deepEqual(both.byPair[a.pairId], []);
     assert.equal(both.byPair[b.pairId].length, 1);
-    const tooMany = Array.from({ length: 65 }, () => newPairing().pairId).join(",");
+    const tooMany = Array.from({ length: 513 }, () => newPairing().pairId).join(","); // 512 at most since 0.9.3
     assert.equal((await fetch(`${url}/api/pending?pairIds=${tooMany}`)).status, 400);
   });
 });

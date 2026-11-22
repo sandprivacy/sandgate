@@ -393,6 +393,8 @@ export const PWA_HTML = `<!doctype html>
     font: 600 14px/1.35 inherit; font-family: inherit; text-align: left;
   }
   .alert .txt { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .alert .txt.wrap { white-space: normal; }
+  .alert.static { cursor: default; }
   .alert::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--no); flex: none; }
   .section-h { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--soft); margin: 22px 0 6px; }
   .section-h:first-child { margin-top: 2px; }
@@ -473,6 +475,7 @@ export const PWA_HTML = `<!doctype html>
   .d.denied { color: #d98a76; }
   .d.expired { color: var(--soft); }
   .hrow.tap { cursor: pointer; }
+  .hrow .dup { color: var(--accent); font-size: 12px; }
   .hrow.open .t { white-space: normal; }
   .hmore {
     padding: 8px 10px 10px 56px; border-bottom: 1px solid var(--line);
@@ -554,7 +557,7 @@ export const PWA_HTML = `<!doctype html>
   <div class="pill warn" id="status">starting</div>
 </header>
 <main>
-  <section class="view on" id="v-req"><div id="banner"></div><div id="alerts"></div><div id="list"></div></section>
+  <section class="view on" id="v-req"><div id="readerr"></div><div id="banner"></div><div id="alerts"></div><div id="list"></div></section>
   <section class="view" id="v-srv"><div id="servers"></div></section>
   <section class="view" id="v-hist"><div id="hist"></div></section>
   <section class="view" id="v-set"><div id="vaults"></div></section>
@@ -673,9 +676,38 @@ export const PWA_HTML = `<!doctype html>
     try { localStorage.setItem(ANSWERED_KEY, JSON.stringify(answered)); } catch (e) {}
   }
   syncStore();
+  // Stop this device ringing for a pairing it no longer holds: the relay
+  // kept pushing a removed vault's requests (and its server alerts).
+  function unsubscribeFrom(pairId) {
+    if (!("serviceWorker" in navigator)) return Promise.resolve();
+    return navigator.serviceWorker.getRegistration()
+      .then(function (reg) { return reg && reg.pushManager ? reg.pushManager.getSubscription() : null; })
+      .then(function (sub) {
+        if (!sub) return;
+        return fetch("/api/unsubscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pairId: pairId, endpoint: sub.endpoint }),
+        });
+      })
+      .catch(function () {});
+  }
   function addPairing(parsed) {
     for (var i = 0; i < pairs.length; i++) {
       if (pairs[i].pairId === parsed.pairId) return false;
+    }
+    // Pairing a server again under its name left the old pairing behind,
+    // dead, and a phone collected them until it passed the relay's limit.
+    // Same name: offer to replace it.
+    if (parsed.name) {
+      for (var j = pairs.length - 1; j >= 0; j--) {
+        if (pairs[j].name !== parsed.name) continue;
+        if (confirm('"' + parsed.name + '" is already paired with this device.\\n\\nOK: replace it (that server or vault was paired again).\\nCancel: keep both.')) {
+          unsubscribeFrom(pairs[j].pairId);
+          pairs.splice(j, 1);
+        }
+        break;
+      }
     }
     pairs.push({
       name: parsed.name || ("Vault " + (pairs.length + 1)),
@@ -1021,11 +1053,27 @@ export const PWA_HTML = `<!doctype html>
   // Announce this page to the relay immediately (push or not), so the
   // "sandgate pair" command can report "phone connected" without waiting
   // on notification permission.
-  pairs.forEach(function (p) {
+  // Slices of 200 (this page always comes from a relay that takes 512).
+  // One call for all of them stopped working at 65 pairings on 0.9.2 (the
+  // relay said "bad pairId" and the screen stayed empty); one call per
+  // pairing, at that count, is a burst a proxy's rate limit cuts into.
+  // 200 ids make a 5 KB URL, and one live stream for most phones: over
+  // HTTP/1.1 a browser keeps 6 connections per site, streams included.
+  var BATCH = 200;
+  function pairChunks() {
+    var out = [];
+    for (var i = 0; i < pairs.length; i += BATCH) out.push(pairs.slice(i, i + BATCH));
+    return out;
+  }
+  function idsParam(list) {
+    return list.map(function (p) { return encodeURIComponent(p.pairId); }).join(",");
+  }
+  function idsOf(list) { return list.map(function (p) { return p.pairId; }); }
+  pairChunks().forEach(function (chunk) {
     fetch("/api/hello", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pairId: p.pairId }),
+      body: JSON.stringify({ pairIds: idsOf(chunk) }),
     }).catch(function () {});
   });
 
@@ -1048,11 +1096,11 @@ export const PWA_HTML = `<!doctype html>
   /** Tell the relay this device's push endpoint serves these vaults. */
   function registerSubscription(sub) {
     return Promise.all(
-      pairs.map(function (p) {
+      pairChunks().map(function (chunk) {
         return fetch("/api/subscribe", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pairId: p.pairId, subscription: sub }),
+          body: JSON.stringify({ pairIds: idsOf(chunk), subscription: sub }),
         });
       })
     );
@@ -1137,33 +1185,37 @@ export const PWA_HTML = `<!doctype html>
   // --- live updates: SSE with a slow safety poll ---------------------------
   var sseOn = false;
   var streams = [];
-  // Every vault of this device, for the batched calls: one stream and one
-  // read per refresh, however many vaults. One per vault, with polls on
-  // top, is what ran a phone into the relay's rate limit.
-  function pairIdsParam() {
-    return pairs.map(function (p) { return encodeURIComponent(p.pairId); }).join(",");
-  }
+  // One stream per slice of vaults (one for most phones), and one read
+  // per slice per refresh. One per vault, with polls on top, is what ran
+  // a phone into the relay's rate limit.
   function connectEvents() {
     if (!("EventSource" in window) || !pairs.length) return;
-    streams.forEach(function (es) { try { es.close(); } catch (e) {} });
+    streams.forEach(function (s) { try { s.es.close(); } catch (e) {} });
     streams = [];
-    var es = new EventSource("/api/events?pairIds=" + pairIdsParam());
-    es.addEventListener("request", fetchPending);
-    es.addEventListener("decision", fetchPending);
-    es.addEventListener("status", function () { fetchStatuses(); });
-    es.onopen = function () {
-      sseOn = true;
-      if (!pushOn) setStatus("live");
-      // Whatever happened while the stream was down was never announced:
-      // read it now, not at the next poll.
-      fetchPending();
-    };
-    es.onerror = function () {
-      // EventSource reconnects on its own (retry: 3000).
-      sseOn = false;
-      if (!pushOn) setStatus("polling", "warn");
-    };
-    streams.push(es);
+    sseOn = false;
+    pairChunks().forEach(function (chunk) {
+      var entry = { es: new EventSource("/api/events?pairIds=" + idsParam(chunk)), open: false };
+      var es = entry.es;
+      es.addEventListener("request", fetchPending);
+      es.addEventListener("decision", fetchPending);
+      es.addEventListener("status", function () { fetchStatuses(); });
+      es.onopen = function () {
+        entry.open = true;
+        // Live only when every slice is: the fast poll covers the rest.
+        sseOn = streams.every(function (s) { return s.open; });
+        if (sseOn && !pushOn) setStatus("live");
+        // Whatever happened while the stream was down was never announced:
+        // read it now, not at the next poll.
+        fetchPending();
+      };
+      es.onerror = function () {
+        // EventSource reconnects on its own (retry: 3000).
+        entry.open = false;
+        sseOn = false;
+        if (!pushOn) setStatus("polling", "warn");
+      };
+      streams.push(entry);
+    });
   }
   connectEvents();
   // Polls stay on even with a live stream: a stream can look open while
@@ -1349,19 +1401,48 @@ export const PWA_HTML = `<!doctype html>
     retryDelay = Math.min(15000, retryDelay * 2);
   }
 
+  var readFailures = 0;
+  var readErrEl = document.getElementById("readerr");
+  function showReadError(why) {
+    readErrEl.textContent = "";
+    if (!why) return;
+    var box = document.createElement("div");
+    box.className = "alert static";
+    box.setAttribute("role", "alert");
+    var t = document.createElement("span"); t.className = "txt wrap";
+    t.textContent = "Requests could not be read from the relay (" + why + "). Retrying\u2026";
+    box.appendChild(t);
+    readErrEl.appendChild(box);
+  }
+
   async function refreshOnce() {
     var seen = {};
     var answeredBy = {};
     var failed = false;
     var byPair = null;
+    var why = null;
+    var refused = false;
     if (pairs.length) {
-      try {
-        var res = await fetch("/api/pending?pairIds=" + pairIdsParam());
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        var body = await res.json();
-        if (!body || typeof body.byPair !== "object" || body.byPair === null) throw new Error("not a list");
-        byPair = body.byPair;
-      } catch (e) { failed = true; }
+      // A slice that fails leaves its vaults' cards as they were; the
+      // others still update.
+      var parts = await Promise.all(pairChunks().map(async function (chunk) {
+        try {
+          var res = await fetch("/api/pending?pairIds=" + idsParam(chunk));
+          if (!res.ok) {
+            why = "HTTP " + res.status;
+            if (res.status >= 400 && res.status < 500 && res.status !== 429) refused = true;
+            return null;
+          }
+          var body = await res.json();
+          if (!body || typeof body.byPair !== "object" || body.byPair === null) { why = "unreadable answer"; return null; }
+          return body.byPair;
+        } catch (e) { why = "relay unreachable"; return null; }
+      }));
+      parts.forEach(function (part) {
+        if (!part) { failed = true; return; }
+        byPair = byPair || {};
+        for (var k in part) byPair[k] = part[k];
+      });
     }
     await Promise.all(pairs.map(async function (p) {
       var raw = byPair && byPair[p.pairId];
@@ -1395,6 +1476,10 @@ export const PWA_HTML = `<!doctype html>
     }
     ensureEmpty(activeCount() === 0);
     if (failed) scheduleRetry(); else retryDelay = 1500;
+    // An empty screen that is really an error said nothing: a refusal is
+    // shown at once, a network that keeps failing after three tries.
+    readFailures = failed ? readFailures + 1 : 0;
+    showReadError(failed && (refused || readFailures >= 3) ? why : null);
     if (scrollToCards && liveCards().length) { scrollToCards = false; revealCards(); }
     else if (!failed) scrollToCards = false;
     updateJumpPill();
@@ -1634,10 +1719,16 @@ export const PWA_HTML = `<!doctype html>
   function renderVaults() {
     vaultsEl.textContent = "";
     var section = document.createElement("div");
-    section.appendChild(sectionHead("Vaults and servers paired with this device"));
+    section.appendChild(sectionHead("Vaults and servers paired with this device (" + pairs.length + ")"));
     pairs.forEach(function (p, idx) {
       var row = document.createElement("div"); row.className = "hrow";
       var t = document.createElement("span"); t.className = "t"; t.textContent = p.name;
+      // The same name further down is a newer pairing: this one is most
+      // likely the dead one left by pairing that server again.
+      if (pairs.slice(idx + 1).some(function (q) { return q.name === p.name; })) {
+        var dup = document.createElement("span"); dup.className = "dup"; dup.textContent = " · older duplicate";
+        t.appendChild(dup);
+      }
       t.style.cursor = "pointer";
       t.title = "Rename";
       t.onclick = function () {
@@ -1650,20 +1741,7 @@ export const PWA_HTML = `<!doctype html>
         if (!confirm("Remove " + p.name + " from this device?")) return;
         pairs.splice(idx, 1);
         savePairs();
-        // Stop this device ringing for it: the relay kept pushing a removed
-        // vault's requests (and its server alerts) to the lock screen.
-        swRegPromise
-          .then(function (reg) { return reg && reg.pushManager ? reg.pushManager.getSubscription() : null; })
-          .then(function (sub) {
-            if (!sub) return;
-            return fetch("/api/unsubscribe", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ pairId: p.pairId, endpoint: sub.endpoint }),
-            });
-          })
-          .catch(function () {})
-          .then(function () { location.reload(); });
+        unsubscribeFrom(p.pairId).then(function () { location.reload(); });
       };
       row.appendChild(t); row.appendChild(x);
       section.appendChild(row);
@@ -1771,13 +1849,25 @@ export const PWA_HTML = `<!doctype html>
         try { var hb = await (await fetch("/api/health")).json(); latestVersion = hb.server || hb.version || null; } catch (e) {}
       }
       if (!pairs.length) return;
-      var all;
-      try {
-        var res = await fetch("/api/status?pairIds=" + pairIdsParam());
-        if (!res.ok) return; // keep what we had: a failed read is not news
-        all = await res.json();
-      } catch (e) { return; }
-      if (!all || !all.byPair) return;
+      // A slice that fails keeps what we had for its servers: a failed
+      // read is not news.
+      var parts = await Promise.all(pairChunks().map(async function (chunk) {
+        try {
+          var res = await fetch("/api/status?pairIds=" + idsParam(chunk));
+          if (!res.ok) return null;
+          var part = await res.json();
+          return part && part.byPair ? part : null;
+        } catch (e) { return null; }
+      }));
+      var all = { byPair: {}, now: 0 };
+      var any = false;
+      parts.forEach(function (part) {
+        if (!part) return;
+        any = true;
+        for (var k in part.byPair) all.byPair[k] = part.byPair[k];
+        all.now = Math.max(all.now, part.now || 0);
+      });
+      if (!any) return;
       await Promise.all(pairs.map(async function (p) {
         var entry = all.byPair[p.pairId];
         if (!entry) return;

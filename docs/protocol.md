@@ -67,18 +67,21 @@ their requests together.
 ## 3. Requests and decisions
 
 ```
-POST /api/hello        { pairId }                       announce presence
+POST /api/hello        { pairId } | { pairIds: [ … ] }  announce presence (a list only marks pairings the relay holds)
 GET  /api/pending?pairId=<id>                           → [ { requestId, payload, ts, decisions, needed } ]
-GET  /api/pending?pairIds=<id>,<id>,…                   → { byPair: { <id>: [ … ] } }   (≤ 64 ids)
+GET  /api/pending?pairIds=<id>,<id>,…                   → { byPair: { <id>: [ … ] } }
 POST /api/decision     { pairId, requestId, payload }    → 200 | 404 (expired, abandoned, unknown)
 GET  /api/events?pairId=<id>  |  ?pairIds=<id>,…        Server-Sent Events: "request", "decision", "status"
                                                         data: { "pairId": … } names the vault that changed
-POST /api/subscribe    { pairId, subscription }          Web Push only (see §5)
+POST /api/subscribe    { pairId | pairIds, subscription } Web Push only (see §5); a list answers { ok, refused }
 POST /api/unsubscribe  { pairId, endpoint }              this device stops ringing for that vault
 ```
 
 A device with several vaults should use the `pairIds` forms: one stream
-and one read, whatever the number of vaults. Poll `/api/pending` on load,
+and one read per slice of vaults. A relay takes up to 512 ids per call
+since 0.9.3, 64 before. The app asks in slices of 200: a 5 KB URL, and
+one live stream for most phones (over HTTP/1.1 a browser keeps six
+connections per site, streams included). Poll `/api/pending` on load,
 whenever an SSE event arrives and whenever the stream (re)opens; keep a
 slow poll even with a live stream (a stream can look open on a dead
 network). A failed read says nothing about the requests: keep showing

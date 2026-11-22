@@ -121,8 +121,15 @@ const IP_WINDOW_MS = 60 * 1000;
 const MAX_PER_IP = 240;
 /** Calls for pairings in use: a ceiling against a runaway loop, not a quota. */
 const MAX_KNOWN_PER_IP = 3000;
-/** Pairings one batched call (pending, events, status) may cover. */
-const MAX_BATCH = 64;
+/**
+ * Pairings one batched call (pending, events, status, hello, subscribe)
+ * may cover. It was 64, and a phone with 65 pairings (servers re-paired
+ * over time add up) got a 400 for everything and an empty screen. The
+ * app now asks in slices of 64 whatever this says; 512 is for a page
+ * still running an older script. In a URL, 512 ids of 22 characters
+ * make 12 KB: under Node's 16 KB header limit and Cloudflare's URL limit.
+ */
+const MAX_BATCH = 512;
 /**
  * New entries the relay stores on disk for someone (a device subscribing
  * to a vault it was not subscribed to, a server's first heartbeat), per
@@ -595,6 +602,15 @@ export async function startRelay(opts: {
 
   const validId = (s: unknown): s is string =>
     typeof s === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(s);
+  /** `pairIds: [...]` (one call for a device's vaults) or `pairId`. */
+  const bodyIds = (body: any): string[] | null => {
+    if (Array.isArray(body?.pairIds)) {
+      const list = body.pairIds as unknown[];
+      if (!list.length || list.length > MAX_BATCH || !list.every(validId)) return null;
+      return [...new Set(list as string[])];
+    }
+    return validId(body?.pairId) ? [body.pairId] : null;
+  };
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -701,6 +717,7 @@ export async function startRelay(opts: {
           url.searchParams.get("pairId"),
           ...(url.searchParams.get("pairIds") ?? "").split(","),
           body?.pairId,
+          ...(Array.isArray(body?.pairIds) ? body.pairIds.slice(0, MAX_BATCH + 1) : []),
         ].filter((id): id is string => typeof id === "string" && id.length > 0);
         const allKnown = ids.length > 0 && ids.every(known);
         const limited = allKnown ? hit(knownHits, clientIp(req), MAX_KNOWN_PER_IP) : ipLimited(req);
@@ -721,7 +738,8 @@ export async function startRelay(opts: {
 
       if (req.method === "POST" && url.pathname === "/api/subscribe") {
         const body = await readBody(req);
-        if (!validId(body.pairId) || !validSubscription(body.subscription)) {
+        const ids = bodyIds(body);
+        if (!ids || !validSubscription(body.subscription)) {
           return json(res, 400, { error: "pairId and subscription required" });
         }
         if (!pushEndpointAllowed(body.subscription.endpoint, pushHosts)) {
@@ -732,21 +750,28 @@ export async function startRelay(opts: {
           endpoint: body.subscription.endpoint,
           keys: { p256dh: body.subscription.keys.p256dh, auth: body.subscription.keys.auth },
         };
-        const isNew = !state.subscriptions[body.pairId];
-        if (isNew && Object.keys(state.subscriptions).length >= MAX_SUBSCRIBED) {
-          return json(res, 503, { error: "Relay is not accepting new devices right now." });
+        // Each vault on its own terms: the caps count every new one, a
+        // batch included, and the file is written once.
+        let full = 0;
+        let limited = 0;
+        for (const pairId of ids) {
+          const isNew = !state.subscriptions[pairId];
+          if (isNew && Object.keys(state.subscriptions).length >= MAX_SUBSCRIBED) { full++; continue; }
+          if (isNew && newLimited(req)) { limited++; continue; }
+          const pairing = getPairing(pairId);
+          // Same endpoint = same device: replace it (its keys may have
+          // rotated), and keep it last as the most recently seen.
+          pairing.subscriptions = pairing.subscriptions.filter((s) => s.endpoint !== sub.endpoint);
+          pairing.subscriptions.push(sub);
+          while (pairing.subscriptions.length > MAX_SUBSCRIPTIONS) pairing.subscriptions.shift();
+          state.subscriptions[pairId] = pairing.subscriptions;
         }
-        if (isNew && newLimited(req)) {
+        if (full + limited < ids.length) persist();
+        if (Array.isArray(body.pairIds)) return json(res, 200, { ok: true, refused: full + limited });
+        if (full) return json(res, 503, { error: "Relay is not accepting new devices right now." });
+        if (limited) {
           return json(res, 429, { error: "Too many new vaults from this address. Try again later.", retryable: true });
         }
-        const pairing = getPairing(body.pairId);
-        // Same endpoint = same device: replace it (its keys may have
-        // rotated), and keep it last as the most recently seen.
-        pairing.subscriptions = pairing.subscriptions.filter((s) => s.endpoint !== sub.endpoint);
-        pairing.subscriptions.push(sub);
-        while (pairing.subscriptions.length > MAX_SUBSCRIPTIONS) pairing.subscriptions.shift();
-        state.subscriptions[body.pairId] = pairing.subscriptions;
-        persist();
         return json(res, 200, { ok: true });
       }
 
@@ -769,8 +794,14 @@ export async function startRelay(opts: {
       // `sandgate pair` say "phone connected" even before notifications.
       if (req.method === "POST" && url.pathname === "/api/hello") {
         const body = await readBody(req);
-        if (!validId(body.pairId)) return json(res, 400, { error: "bad pairId" });
-        getPairing(body.pairId).lastSeen = Date.now();
+        const ids = bodyIds(body);
+        if (!ids) return json(res, 400, { error: "bad pairId" });
+        const now = Date.now();
+        // A list only marks pairings the relay already holds (the one
+        // being set up has its claim or its pair command waiting): 512
+        // invented ids per call must not become 512 entries in memory.
+        const many = Array.isArray(body.pairIds);
+        for (const id of ids) if (!many || pairings.has(id) || known(id)) getPairing(id).lastSeen = now;
         return json(res, 200, { ok: true });
       }
 

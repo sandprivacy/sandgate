@@ -363,3 +363,109 @@ test("the app offers to scan a pairing code when it has a camera", async () => {
     relay.close();
   }
 });
+
+/** Let a page's first reads (requests, servers) land before closing it. */
+const settle = () => new Promise((r) => setTimeout(r, 1500));
+
+test("450 pairings: the app asks in slices, shows every vault's requests, and says so when the relay refuses", async () => {
+  const relay = await startRelay({ port: 0, stateDir: mkdtempSync(join(tmpdir(), "sandgate-relay-")) });
+  const relayUrl = `http://localhost:${relay.port}`;
+  try {
+    const all = Array.from({ length: 450 }, (_, i) => ({ name: `srv-${i}`, ...newPairing() }));
+    const calls: { url: string; body?: string }[] = [];
+    const { window, close } = await loadPage(relayUrl, {
+      localStorage: { sandgate_pairs: JSON.stringify(all.map((p) => ({ name: p.name, pairId: p.pairId, secret: p.secret }))) },
+      beforeScript: (w) => {
+        const real = w.fetch;
+        w.fetch = (input: string, init?: any) => {
+          calls.push({ url: String(input), body: init?.body });
+          return real(input, init);
+        };
+      },
+    });
+    try {
+      const far = all[420]!; // far beyond the old limit of 64, in the last slice
+      const approver = new PwaApprover({ relayUrl, pairId: far.pairId, secret: far.secret });
+      const decision = approver.request({ title: "From the 421st pairing", timeoutSec: 15 });
+      const btn = await waitFor(() => window.document.querySelector(".card button.ok"));
+      assert.equal(window.document.querySelector(".card h2").textContent, "From the 421st pairing");
+      btn.click();
+      assert.equal((await decision).approved, true);
+
+      const pending = calls.filter((c) => c.url.startsWith("/api/pending"));
+      assert.ok(pending.length >= 3, "three slices of 200 at most");
+      for (const c of pending) assert.ok(new URL(c.url, relayUrl).searchParams.get("pairIds")!.split(",").length <= 200);
+      // One hello per slice, not one per pairing: 450 calls at every load
+      // is a burst nginx cuts into.
+      const hellos = calls.filter((c) => c.url === "/api/hello");
+      assert.equal(hellos.length, 3);
+      assert.deepEqual(hellos.flatMap((c) => JSON.parse(c.body!).pairIds).sort(), all.map((p) => p.pairId).sort());
+      assert.equal(window.document.getElementById("readerr").textContent, "");
+      assert.equal(window.document.querySelector(".section-h").textContent, "Vaults and servers paired with this device (450)");
+    } finally {
+      close();
+    }
+
+    // A relay that refuses (the 64-id limit of 0.9.2): an error, not an empty screen.
+    const refused = await loadPage(relayUrl, {
+      localStorage: { sandgate_pairs: JSON.stringify([{ name: "a", pairId: all[0]!.pairId, secret: all[0]!.secret }]) },
+      beforeScript: (w) => {
+        const real = w.fetch;
+        w.fetch = (input: string, init?: any) =>
+          String(input).startsWith("/api/pending")
+            ? Promise.resolve(new Response(JSON.stringify({ error: "bad pairId" }), { status: 400 }))
+            : real(input, init);
+      },
+    });
+    try {
+      const err = await waitFor(() => refused.window.document.querySelector("#readerr .alert"));
+      assert.match(err.textContent, /could not be read from the relay \(HTTP 400\)/);
+      await settle();
+    } finally {
+      refused.close();
+    }
+  } finally {
+    relay.close();
+  }
+});
+
+test("pairing a server again under its name offers to replace the old pairing", async () => {
+  const relay = await startRelay({ port: 0, stateDir: mkdtempSync(join(tmpdir(), "sandgate-relay-")) });
+  const relayUrl = `http://localhost:${relay.port}`;
+  try {
+    const old = newPairing();
+    const { window, close } = await loadPage(relayUrl, {
+      localStorage: { sandgate_pairs: JSON.stringify([{ name: "us4", pairId: old.pairId, secret: old.secret }]) },
+    });
+    try {
+      const stored = () => JSON.parse(window.localStorage.getItem("sandgate_pairs")).map((p: any) => p.pairId);
+      const again = newPairing();
+      window.confirm = () => true;
+      assert.equal(await window.sandgate.acceptPairingText(`${relayUrl}/#p=${again.pairId}&s=${again.secret}&n=us4`), true);
+      assert.deepEqual(stored(), [again.pairId], "replaced");
+
+      const other = newPairing();
+      window.confirm = () => false;
+      await window.sandgate.acceptPairingText(`${relayUrl}/#p=${other.pairId}&s=${other.secret}&n=us4`);
+      assert.deepEqual(stored(), [again.pairId, other.pairId], "kept both when asked to");
+      await settle();
+    } finally {
+      close();
+    }
+
+    // Duplicates already on a phone: the older one says so in Settings.
+    const a = newPairing(), b = newPairing();
+    const page = await loadPage(relayUrl, {
+      localStorage: { sandgate_pairs: JSON.stringify([{ name: "us2", ...a }, { name: "us2", ...b }]) },
+    });
+    try {
+      const rows = [...page.window.document.querySelectorAll("#vaults .hrow .t")].slice(0, 2).map((t: any) => t.textContent);
+      assert.deepEqual(rows, ["us2 · older duplicate", "us2"]);
+      await settle();
+    } finally {
+      page.close();
+    }
+  } finally {
+    relay.close();
+  }
+});

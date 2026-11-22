@@ -7,7 +7,7 @@
  * `./sandgate.new --version && mv sandgate.new sandgate` only swaps in a
  * binary that actually runs.
  */
-export const VERSION = "0.9.2";
+export const VERSION = "0.9.3";
 
 /**
  * The last release that changed what a server runs: ssh-guard, its PAM
